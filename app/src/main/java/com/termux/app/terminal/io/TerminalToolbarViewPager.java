@@ -4,6 +4,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.ImageButton;
 
 import androidx.annotation.NonNull;
 import androidx.viewpager.widget.PagerAdapter;
@@ -58,6 +59,7 @@ public class TerminalToolbarViewPager {
             } else {
                 layout = inflater.inflate(R.layout.view_terminal_toolbar_text_input, collection, false);
                 final EditText editText = layout.findViewById(R.id.terminal_toolbar_text_input);
+                final ImageButton voiceInput = layout.findViewById(R.id.terminal_toolbar_voice_input);
 
                 if (mSavedTextInput != null) {
                     editText.setText(mSavedTextInput);
@@ -70,6 +72,7 @@ public class TerminalToolbarViewPager {
                         if (session.isRunning()) {
                             String textToSend = editText.getText().toString();
                             if (textToSend.length() == 0) textToSend = "\r";
+                            else textToSend += "\r";
                             session.write(textToSend);
                         } else {
                             mActivity.getTermuxTerminalSessionClient().removeFinishedSession(session);
@@ -78,6 +81,8 @@ public class TerminalToolbarViewPager {
                     }
                     return true;
                 });
+
+                voiceInput.setOnClickListener(v -> TermuxAiSpeechInput.start(mActivity, editText));
             }
             collection.addView(layout);
             return layout;

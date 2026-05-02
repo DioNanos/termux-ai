@@ -14,6 +14,8 @@ import com.termux.shared.termux.settings.preferences.TermuxAppSharedPreferences;
 import com.termux.shared.termux.settings.properties.TermuxAppSharedProperties;
 import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment;
 import com.termux.shared.termux.shell.am.TermuxAmSocketServer;
+import com.termux.app.terminal.ai.TermuxAiSocketServer;
+import com.termux.app.terminal.ai.TermuxAiCliInstaller;
 import com.termux.shared.termux.shell.TermuxShellManager;
 import com.termux.shared.termux.theme.TermuxThemeUtils;
 
@@ -61,6 +63,10 @@ public class TermuxApplication extends Application {
 
             // Setup termux-am-socket server
             TermuxAmSocketServer.setupTermuxAmSocketServer(context);
+
+            // Setup termux-ai socket server for Android-native AI CLI helpers.
+            TermuxAiSocketServer.setup(context);
+            TermuxAiCliInstaller.installIfPossible();
         } else {
             Logger.logErrorExtended(LOG_TAG, "Termux files directory is not accessible\n" + error);
         }
