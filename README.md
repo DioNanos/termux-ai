@@ -85,7 +85,7 @@ build.
 ## Build
 
 ```bash
-JAVA_HOME=/opt/android-studio/jbr ANDROID_HOME=/home/dag/Android/Sdk ./gradlew --no-daemon assembleRelease
+JAVA_HOME=/path/to/jdk ANDROID_HOME=/path/to/android-sdk ./gradlew --no-daemon assembleRelease
 ```
 
 The build downloads the upstream Termux bootstrap zips and applies a small
