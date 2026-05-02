@@ -4,7 +4,7 @@
 > It keeps the normal Termux environment and adds a small compatibility layer for
 > phone-first use with Codex, Gemini CLI, Qwen Code, and similar terminal tools.
 
-[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?include_prereleases&style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
+[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
 [![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.5/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
 [![Android 7+](https://img.shields.io/badge/Android-7%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#install)
 [![target SDK 28](https://img.shields.io/badge/target%20SDK-28-blue?style=flat-square)](#classic-compatibility)
@@ -34,8 +34,7 @@ What this build does:
 - keeps classic Termux package and proot compatibility
 - improves Android keyboard microphone input in the terminal
 - adds a toolbar text input path for quick command submission
-- installs small `termux-ai-*` shell helpers inside `$PREFIX/bin`
-- exposes a minimal Android context bridge for AI-aware helpers
+- includes the first internal pieces for a minimal Android context bridge
 - includes `mandoc` in the first bootstrap to avoid manpage database warnings
 
 What this build does not do:
@@ -68,39 +67,19 @@ Keeping target SDK 28 preserves classic Termux behavior. New Android versions
 may show an "app was built for an older Android version" warning; that is the
 tradeoff for full classic Termux package compatibility.
 
-## AI And Android Bridge
+## AI And Android
 
-The bridge is intentionally small in this release. It is meant to give terminal
-AI tools a clean way to ask for basic Android context without adding another
-app.
+This release focuses on making the normal terminal more practical for AI CLI
+work from Android:
 
-Available command families:
+- Android keyboard microphone dictation works through normal IME text input.
+- The toolbar text field can send command text quickly.
+- The first internal bridge pieces are present, but they are not documented as a
+  stable shell API yet.
 
-- `sys.info`
-- `sys.battery`
-- `sys.clipboard.get`
-- `sys.clipboard.set`
-- `sys.vibrate`
-- `sys.notify`
-- `sensor.list`
-- `sensor.read`
-- `storage.info`
-- `storage.list`
-- `storage.read`
-- `storage.write`
-
-Generated shell helpers:
-
-- `termux-ai`
-- `termux-ai-info`
-- `termux-ai-battery`
-- `termux-ai-clipboard`
-- `termux-ai-vibrate`
-- `termux-ai-notify`
-- `termux-ai-sensor`
-
-Storage bridge access is restricted to allowed app roots. It is not a bypass for
-Android scoped storage.
+The public user-facing surface for this release is the terminal experience, not
+new shell commands. Android bridge commands will be documented once they are
+installed and validated consistently after bootstrap.
 
 ## Releases
 
@@ -109,8 +88,7 @@ Android scoped storage.
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
 
-The first public release is intentionally marked as a pre-release while real
-device feedback is collected.
+This is the first public release of Termux AI Classic.
 
 ## Build
 
@@ -129,14 +107,14 @@ cleaner without committing large generated bootstrap archives.
   the APK is signed with the same key.
 - Android may show an older-target warning on recent versions.
 - Voice input depends on the active Android keyboard and speech service.
-- The hardware bridge is a base layer and will expand only through clean Android
-  public APIs.
+- Android bridge commands are not a stable public shell API in this release.
 
 ## Roadmap
 
 - improve voice input compatibility across Android keyboards
 - add more AI-friendly terminal affordances without breaking shell behavior
-- expand the Android bridge where public APIs allow it cleanly
+- expose Android bridge commands only after bootstrap-safe installation is
+  validated
 - keep Classic releases stable for current AI CLI use
 - study a separate modern-runtime line for target SDK 35+ without pretending it
   is classic Termux
