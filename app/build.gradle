@@ -61,8 +61,8 @@ android {
     defaultConfig {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 118
-        versionName "0.118.0"
+        versionCode 119
+        versionName "0.118.0-ai.4"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -254,6 +254,13 @@ task downloadBootstraps() {
         } else {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
         }
+
+        def mandocOverlayResult = providers.exec {
+            workingDir rootProject.projectDir
+            commandLine "bash", "scripts/bootstrap/add-mandoc-to-bootstraps.sh"
+        }.result.get()
+        if (mandocOverlayResult.exitValue != 0)
+            throw new GradleException("Failed to add mandoc to bootstrap zips")
     }
 }
 
