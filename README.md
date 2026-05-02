@@ -1,10 +1,10 @@
-# Termux AI
+# Termux AI Classic
 
-Optimized Termux version for AI CLI workflows on Android.
+Optimized Termux Classic version for AI CLI workflows on Android.
 
-Termux AI keeps the normal Termux environment and focuses on making command-line
-AI tools practical from a phone: Codex, Gemini CLI, Qwen Code, and similar
-terminal-first assistants.
+Termux AI Classic keeps the normal Termux environment and focuses on making
+command-line AI tools practical from a phone: Codex, Gemini CLI, Qwen Code, and
+similar terminal-first assistants.
 
 ## Focus
 
@@ -74,12 +74,13 @@ Android scoped storage.
 
 ## Install Notes
 
-Termux AI uses the `com.termux` package name. Android requires an installed app
-update to be signed with the same key as the existing app.
+Termux AI Classic uses the `com.termux` package name. Android requires an
+installed app update to be signed with the same key as the existing app.
 
 If another Termux build is already installed with a different signature, make a
 backup first, then uninstall Termux and its plugins before installing this APK.
-Future Termux AI releases signed with the same key can update this build.
+Future Termux AI Classic releases signed with the same key can update this
+build.
 
 ## Build
 
@@ -112,8 +113,8 @@ cleaner without committing large generated bootstrap archives.
 
 ## License And Thanks
 
-Termux AI preserves Termux licensing and notices. See the repository license
-files for GPL, Apache, and MIT components.
+Termux AI Classic preserves Termux licensing and notices. See the repository
+license files for GPL, Apache, and MIT components.
 
 Thanks to the Termux project and community for the foundation this work builds
 on.

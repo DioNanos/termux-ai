@@ -61,8 +61,8 @@ android {
     defaultConfig {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 119
-        versionName "0.118.0-ai.4"
+        versionCode 120
+        versionName "0.118.0-ai.5"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -267,5 +267,10 @@ task downloadBootstraps() {
 afterEvaluate {
     android.applicationVariants.all { variant ->
         variant.javaCompileProvider.get().dependsOn(downloadBootstraps)
+    }
+    tasks.configureEach { task ->
+        if (task.name.startsWith("configureNdkBuild") || task.name.startsWith("buildNdkBuild")) {
+            task.dependsOn(downloadBootstraps)
+        }
     }
 }
