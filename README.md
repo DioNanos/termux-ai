@@ -4,8 +4,8 @@
 > It keeps the normal Termux environment and adds a small compatibility layer for
 > phone-first use with Codex, Gemini CLI, Qwen Code, and similar terminal tools.
 
-[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
-[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.5/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
+[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
+[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.6/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
 [![Android 7+](https://img.shields.io/badge/Android-7%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#install)
 [![target SDK 28](https://img.shields.io/badge/target%20SDK-28-blue?style=flat-square)](#classic-compatibility)
 [![license](https://img.shields.io/github/license/DioNanos/termux-ai?style=flat-square)](./LICENSE.md)
@@ -14,7 +14,7 @@
 
 Download the latest APK from:
 
-- [GitHub release v0.118.0-ai.5](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
+- [GitHub release v0.118.0-ai.6](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
 
 Requirements:
 
@@ -34,7 +34,7 @@ What this build does:
 - keeps classic Termux package and proot compatibility
 - improves Android keyboard microphone input in the terminal
 - adds a toolbar text input path for quick command submission
-- includes the first internal pieces for a minimal Android context bridge
+- installs a verified `termux-ai` shell command for core Android context
 - includes `mandoc` in the first bootstrap to avoid manpage database warnings
 
 What this build does not do:
@@ -74,16 +74,26 @@ work from Android:
 
 - Android keyboard microphone dictation works through normal IME text input.
 - The toolbar text field can send command text quickly.
-- The first internal bridge pieces are present, but they are not documented as a
-  stable shell API yet.
+- The `termux-ai` command exposes a small JSON-first Android context surface.
 
-The public user-facing surface for this release is the terminal experience, not
-new shell commands. Android bridge commands will be documented once they are
-installed and validated consistently after bootstrap.
+Stable commands in this line:
+
+```bash
+termux-ai --version
+termux-ai doctor
+termux-ai ping
+termux-ai info
+termux-ai battery
+termux-ai clipboard get
+termux-ai clipboard set "hello from Termux AI"
+```
+
+Output is compact JSON by default. Commands return exit code `0` only when the
+bridge reports success.
 
 ## Releases
 
-- Current GitHub release: [v0.118.0-ai.5](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.5)
+- Current GitHub release: [v0.118.0-ai.6](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
 - Current line: `0.118.0-ai.x`
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
@@ -107,14 +117,15 @@ cleaner without committing large generated bootstrap archives.
   the APK is signed with the same key.
 - Android may show an older-target warning on recent versions.
 - Voice input depends on the active Android keyboard and speech service.
-- Android bridge commands are not a stable public shell API in this release.
+- Android bridge commands outside the documented `termux-ai` core are not stable
+  public shell API in this release.
 
 ## Roadmap
 
 - improve voice input compatibility across Android keyboards
 - add more AI-friendly terminal affordances without breaking shell behavior
-- expose Android bridge commands only after bootstrap-safe installation is
-  validated
+- expand Android bridge commands only after bootstrap-safe installation is
+  validated on device
 - keep Classic releases stable for current AI CLI use
 - study a separate modern-runtime line for target SDK 35+ without pretending it
   is classic Termux

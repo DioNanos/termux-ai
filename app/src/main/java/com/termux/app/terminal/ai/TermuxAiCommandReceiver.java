@@ -30,11 +30,15 @@ public final class TermuxAiCommandReceiver extends BroadcastReceiver {
 
             String response = TermuxAiSocketServer.processRequest(context,
                 new JSONObject().put("cmd", cmd == null ? "ping" : cmd).put("args", args).toString());
-            setResultCode(0);
+            setResultCode(new JSONObject(response).optBoolean("ok", false) ? 0 : 1);
             setResultData(response);
         } catch (Exception e) {
             setResultCode(1);
-            setResultData("{\"ok\":false,\"error\":\"" + e.getMessage() + "\"}");
+            try {
+                setResultData(new JSONObject().put("ok", false).put("error", e.getMessage()).toString());
+            } catch (Exception ignored) {
+                setResultData("{\"ok\":false,\"error\":\"Unknown bridge error\"}");
+            }
         }
     }
 }

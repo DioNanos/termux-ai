@@ -1,0 +1,130 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+VERSION="0.118.0-ai.6"
+ACTION="com.termux.AI_COMMAND"
+RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
+
+json_escape() {
+  sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+fail_json() {
+  local message="$1"
+  local code="${2:-1}"
+  printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$message" | json_escape)"
+  exit "$code"
+}
+
+usage() {
+  cat <<'EOF'
+termux-ai: Android context helper for Termux AI Classic
+
+Usage:
+  termux-ai --version
+  termux-ai doctor
+  termux-ai ping
+  termux-ai info
+  termux-ai battery
+  termux-ai clipboard get
+  termux-ai clipboard set TEXT
+
+Output is compact JSON by default.
+EOF
+}
+
+run_broadcast() {
+  local cmd="$1"
+  shift || true
+
+  local am_bin=""
+  if command -v termux-am >/dev/null 2>&1; then
+    am_bin="$(command -v termux-am)"
+  elif [ -x /system/bin/am ]; then
+    am_bin="/system/bin/am"
+  else
+    fail_json "Neither termux-am nor /system/bin/am is available"
+  fi
+
+  local output status
+  set +e
+  output="$("$am_bin" broadcast --receiver-foreground -n "$RECEIVER" -a "$ACTION" --es cmd "$cmd" "$@" 2>&1)"
+  status=$?
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    fail_json "$output" "$status"
+  fi
+
+  local line result_code data
+  line="$(printf '%s\n' "$output" | sed -n 's/^Broadcast completed: result=\([-0-9][0-9]*\), data="\(.*\)"$/\1	\2/p' | tail -n 1)"
+  if [ -z "$line" ]; then
+    fail_json "Unexpected bridge response: $output"
+  fi
+
+  result_code="${line%%	*}"
+  data="${line#*	}"
+
+  printf '%s\n' "$data"
+  case "$result_code" in
+    ''|*[!0-9-]*)
+      exit 1
+      ;;
+    *)
+      if [ "$result_code" -eq 0 ]; then
+        exit 0
+      fi
+      exit 1
+      ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  if [ -n "$command" ]; then
+    shift || true
+  fi
+
+  case "$command" in
+    --version|-V)
+      printf '{"ok":true,"version":"%s"}\n' "$VERSION"
+      ;;
+    --help|-h|help)
+      usage
+      ;;
+    doctor)
+      run_broadcast bridge.version
+      ;;
+    ping)
+      run_broadcast ping
+      ;;
+    info)
+      run_broadcast sys.info
+      ;;
+    battery)
+      run_broadcast sys.battery
+      ;;
+    clipboard)
+      case "${1:-}" in
+        get)
+          run_broadcast sys.clipboard.get
+          ;;
+        set)
+          shift || true
+          run_broadcast sys.clipboard.set --es text "$*"
+          ;;
+        *)
+          fail_json "Usage: termux-ai clipboard get|set TEXT"
+          ;;
+      esac
+      ;;
+    "")
+      usage
+      ;;
+    *)
+      fail_json "Unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"

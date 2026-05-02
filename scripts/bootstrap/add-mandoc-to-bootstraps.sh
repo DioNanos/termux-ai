@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work_root="${repo_root}/app/build/termux-ai-mandoc-bootstrap"
 bootstrap_dir="${repo_root}/app/src/main/cpp"
+termux_ai_cli_asset="${repo_root}/app/src/main/assets/termux-ai"
 mirror_base="${TERMUX_MANDOC_MIRROR:-https://termux.librehat.com/apt/termux-main}"
 
 mkdir -p "$work_root"
@@ -102,34 +103,41 @@ patch_bootstrap() {
     exit 1
   }
 
-  if unzip -l "$zip_path" | grep -q ' bin/mandoc$'; then
-    echo "bootstrap-${arch}.zip already contains mandoc"
+  local has_mandoc=0
+  local has_termux_ai=0
+  unzip -l "$zip_path" | grep -q ' bin/mandoc$' && has_mandoc=1
+  unzip -l "$zip_path" | grep -q ' bin/termux-ai$' && has_termux_ai=1
+
+  if [[ "$has_mandoc" == "1" && "$has_termux_ai" == "1" ]]; then
+    echo "bootstrap-${arch}.zip already contains mandoc and termux-ai"
     return
   fi
-
-  local deb
-  deb="$(download_mandoc "$arch")"
 
   local patch_dir="${work_root}/patch-${arch}"
   rm -rf "$patch_dir"
   mkdir -p "$patch_dir/bootstrap" "$patch_dir/data" "$patch_dir/control"
 
   unzip -q "$zip_path" -d "$patch_dir/bootstrap"
-  extract_deb_part "$deb" data "$patch_dir/data"
-  extract_deb_part "$deb" control "$patch_dir/control"
 
-  local prefix_dir="$patch_dir/data/data/data/com.termux/files/usr"
-  [[ -d "$prefix_dir" ]] || {
-    echo "Unexpected mandoc deb layout for $arch" >&2
-    exit 1
-  }
+  if [[ "$has_mandoc" != "1" ]]; then
+    local deb
+    deb="$(download_mandoc "$arch")"
 
-  rsync -a --copy-links --exclude='bin/apropos' --exclude='bin/makewhatis' \
-    --exclude='bin/man' --exclude='bin/whatis' \
-    --exclude='share/man/man1/whatis.1.gz' \
-    "${prefix_dir}/" "$patch_dir/bootstrap/"
+    extract_deb_part "$deb" data "$patch_dir/data"
+    extract_deb_part "$deb" control "$patch_dir/control"
 
-  cat >> "$patch_dir/bootstrap/SYMLINKS.txt" <<'EOF'
+    local prefix_dir="$patch_dir/data/data/data/com.termux/files/usr"
+    [[ -d "$prefix_dir" ]] || {
+      echo "Unexpected mandoc deb layout for $arch" >&2
+      exit 1
+    }
+
+    rsync -a --copy-links --exclude='bin/apropos' --exclude='bin/makewhatis' \
+      --exclude='bin/man' --exclude='bin/whatis' \
+      --exclude='share/man/man1/whatis.1.gz' \
+      "${prefix_dir}/" "$patch_dir/bootstrap/"
+
+    cat >> "$patch_dir/bootstrap/SYMLINKS.txt" <<'EOF'
 mandoc←./bin/apropos
 ../bin/mandoc←./bin/makewhatis
 mandoc←./bin/man
@@ -137,24 +145,31 @@ mandoc←./bin/whatis
 apropos.1.gz←./share/man/man1/whatis.1.gz
 EOF
 
-  mkdir -p "$patch_dir/bootstrap/var/lib/dpkg/info"
-  cp "$patch_dir/control/conffiles" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.conffiles"
-  cp "$patch_dir/control/postinst" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.postinst"
-  cp "$patch_dir/control/triggers" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.triggers"
+    mkdir -p "$patch_dir/bootstrap/var/lib/dpkg/info"
+    cp "$patch_dir/control/conffiles" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.conffiles"
+    cp "$patch_dir/control/postinst" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.postinst"
+    cp "$patch_dir/control/triggers" "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.triggers"
 
-  (cd "$patch_dir/data" && find . -mindepth 1 | sed 's#^\./#/#' | sort) \
-    > "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.list"
+    (cd "$patch_dir/data" && find . -mindepth 1 | sed 's#^\./#/#' | sort) \
+      > "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.list"
 
-  (cd "$patch_dir/data" && find data -type f -print0 | sort -z | xargs -0 md5sum) \
-    > "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.md5sums"
+    (cd "$patch_dir/data" && find data -type f -print0 | sort -z | xargs -0 md5sum) \
+      > "$patch_dir/bootstrap/var/lib/dpkg/info/mandoc.md5sums"
 
-  write_status_entry "$arch" "$patch_dir/bootstrap/var/lib/dpkg/status"
+    write_status_entry "$arch" "$patch_dir/bootstrap/var/lib/dpkg/status"
+  fi
+
+  [[ -f "$termux_ai_cli_asset" ]] || {
+    echo "Missing termux-ai CLI asset: $termux_ai_cli_asset" >&2
+    exit 1
+  }
+  install -m 0700 "$termux_ai_cli_asset" "$patch_dir/bootstrap/bin/termux-ai"
 
   local tmp_zip="${zip_path}.tmp"
   rm -f "$tmp_zip"
   (cd "$patch_dir/bootstrap" && TZ=UTC find . -print | sort | zip -q -X -0 "$tmp_zip" -@)
   mv "$tmp_zip" "$zip_path"
-  echo "Patched bootstrap-${arch}.zip with mandoc"
+  echo "Patched bootstrap-${arch}.zip with mandoc/termux-ai"
 }
 
 for arch in aarch64 arm i686 x86_64; do

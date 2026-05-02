@@ -66,7 +66,7 @@ public class TermuxApplication extends Application {
 
             // Setup termux-ai socket server for Android-native AI CLI helpers.
             TermuxAiSocketServer.setup(context);
-            TermuxAiCliInstaller.installIfPossible();
+            TermuxAiCliInstaller.installIfPossible(context);
         } else {
             Logger.logErrorExtended(LOG_TAG, "Termux files directory is not accessible\n" + error);
         }
