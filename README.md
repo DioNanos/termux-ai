@@ -4,8 +4,8 @@
 > It keeps the normal Termux environment and adds a small compatibility layer for
 > phone-first use with Codex, Gemini CLI, Qwen Code, and similar terminal tools.
 
-[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
-[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.6/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
+[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
+[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.7/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
 [![Android 7+](https://img.shields.io/badge/Android-7%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#install)
 [![target SDK 28](https://img.shields.io/badge/target%20SDK-28-blue?style=flat-square)](#classic-compatibility)
 [![license](https://img.shields.io/github/license/DioNanos/termux-ai?style=flat-square)](./LICENSE.md)
@@ -14,7 +14,7 @@
 
 Download the latest APK from:
 
-- [GitHub release v0.118.0-ai.6](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
+- [GitHub release v0.118.0-ai.7](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
 
 Requirements:
 
@@ -35,6 +35,7 @@ What this build does:
 - improves Android keyboard microphone input in the terminal
 - adds a toolbar text input path for quick command submission
 - installs a verified `termux-ai` shell command for core Android context
+- internalizes the first wave of Termux:API-compatible helpers for AI CLI use
 - includes `mandoc` in the first bootstrap to avoid manpage database warnings
 
 What this build does not do:
@@ -42,7 +43,7 @@ What this build does not do:
 - replace upstream Termux
 - target the Play Store compatibility model
 - bypass Android scoped storage
-- turn the hardware bridge into a full Android automation framework
+- expose sensitive phone automation such as SMS, calls, call logs, or contacts
 - carry broad product changes unrelated to AI CLI use from Android
 
 ## Classic Compatibility
@@ -76,29 +77,74 @@ work from Android:
 - The toolbar text field can send command text quickly.
 - The `termux-ai` command exposes a small JSON-first Android context surface.
 
-Stable commands in this line:
+Stable `termux-ai` commands in this line:
 
 ```bash
 termux-ai --version
 termux-ai doctor
+termux-ai api list
 termux-ai ping
 termux-ai info
 termux-ai battery
 termux-ai clipboard get
 termux-ai clipboard set "hello from Termux AI"
+termux-ai tts engines
+termux-ai tts speak "hello from Termux AI"
+termux-ai toast "done"
+termux-ai volume
+termux-ai audio info
+termux-ai brightness 120
+termux-ai torch on
+termux-ai torch off
+termux-ai camera info
+termux-ai notify "Termux AI" "task finished"
+termux-ai wifi connection
 ```
 
 Output is compact JSON by default. Commands return exit code `0` only when the
 bridge reports success.
 
+## Termux:API Compatibility
+
+Termux AI Classic includes a first internal compatibility wave for common
+Termux:API shell commands. These commands are installed inside Termux by the app
+and do not require the separate `com.termux.api` application for the supported
+surface:
+
+```bash
+termux-tts-speak "hello"
+termux-tts-engines
+termux-toast "done"
+termux-volume
+termux-audio-info
+termux-brightness 120
+termux-torch on
+termux-torch off
+termux-camera-info
+termux-notification -t "Termux AI" -c "task finished"
+termux-notification-channel ai "AI"
+termux-notification-remove 1773
+termux-wifi-connectioninfo
+termux-battery-status
+termux-clipboard-get
+termux-clipboard-set "hello"
+termux-vibrate
+```
+
+The app also installs a `$PREFIX/libexec/termux-api` shim for the supported
+Wave 1 methods. Compatibility is intentionally scoped to AI-safe helpers first;
+SMS, calls, call logs, contacts, continuous location, USB, NFC, and notification
+listener access are not part of this public release.
+
 ## Releases
 
-- Current GitHub release: [v0.118.0-ai.6](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.6)
+- Current GitHub release: [v0.118.0-ai.7](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
 - Current line: `0.118.0-ai.x`
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
 
-This is the first public release of Termux AI Classic.
+`v0.118.0-ai.7` is the first release with internal Termux:API-compatible
+helpers for common AI CLI workflows.
 
 ## Build
 
@@ -117,15 +163,17 @@ cleaner without committing large generated bootstrap archives.
   the APK is signed with the same key.
 - Android may show an older-target warning on recent versions.
 - Voice input depends on the active Android keyboard and speech service.
-- Android bridge commands outside the documented `termux-ai` core are not stable
-  public shell API in this release.
+- The internal Termux:API compatibility layer covers only the documented Wave 1
+  commands in this release.
+- Android may require manual permission grants for some device functions, such
+  as brightness control.
 
 ## Roadmap
 
 - improve voice input compatibility across Android keyboards
 - add more AI-friendly terminal affordances without breaking shell behavior
-- expand Android bridge commands only after bootstrap-safe installation is
-  validated on device
+- expand Android bridge commands only after bootstrap-safe installation and
+  device smoke tests are validated
 - keep Classic releases stable for current AI CLI use
 - study a separate modern-runtime line for target SDK 35+ without pretending it
   is classic Termux
