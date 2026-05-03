@@ -10,11 +10,19 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
+import android.media.AudioManager;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
+import android.provider.Settings;
+import android.speech.tts.TextToSpeech;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 
@@ -31,6 +39,7 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -38,12 +47,15 @@ public final class TermuxAiSocketServer {
 
     public static final String LOG_TAG = "TermuxAiSocketServer";
     public static final String TITLE = "TermuxAi";
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.2.0";
     public static final String SOCKET_FILE_PATH =
         TermuxConstants.TERMUX_APP.APPS_DIR_PATH + "/termux-ai/ai.sock";
     private static final String CHANNEL_ID = "termux_ai_bridge";
 
     private static LocalSocketManager socketServer;
+    private static TextToSpeech tts;
+    private static boolean ttsReady;
+    private static String ttsEngine;
 
     private TermuxAiSocketServer() {}
 
@@ -117,6 +129,8 @@ public final class TermuxAiSocketServer {
                         return ok(new JSONObject().put("message", "pong"));
                     case "bridge.version":
                         return ok(new JSONObject().put("version", VERSION).put("socket", SOCKET_FILE_PATH));
+                    case "api.list":
+                        return ok(apiList());
                     case "sys.info":
                         return ok(sysInfo());
                     case "sys.battery":
@@ -128,7 +142,32 @@ public final class TermuxAiSocketServer {
                     case "sys.vibrate":
                         return ok(vibrate(args));
                     case "sys.notify":
+                    case "notification.show":
                         return ok(notify(args));
+                    case "notification.channel":
+                        return ok(notificationChannel(args));
+                    case "notification.remove":
+                        return ok(notificationRemove(args));
+                    case "ui.toast":
+                        return ok(toast(args));
+                    case "audio.info":
+                        return ok(audioInfo());
+                    case "audio.volume":
+                        return ok(audioVolume(args));
+                    case "audio.volume.list":
+                        return ok(audioVolumeList());
+                    case "display.brightness":
+                        return ok(brightness(args));
+                    case "camera.info":
+                        return ok(cameraInfo());
+                    case "camera.torch":
+                        return ok(torch(args));
+                    case "wifi.connection":
+                        return ok(wifiConnection());
+                    case "tts.engines":
+                        return ok(ttsEngines());
+                    case "tts.speak":
+                        return ok(ttsSpeak(args));
                     case "sensor.list":
                         return ok(sensorList());
                     case "sensor.read":
@@ -147,6 +186,40 @@ public final class TermuxAiSocketServer {
             } catch (Exception e) {
                 return error("Invalid request: " + e.getMessage());
             }
+        }
+
+        private JSONObject apiList() throws Exception {
+            return new JSONObject()
+                .put("version", VERSION)
+                .put("commands", new JSONArray()
+                    .put("ping")
+                    .put("bridge.version")
+                    .put("api.list")
+                    .put("sys.info")
+                    .put("sys.battery")
+                    .put("sys.clipboard.get")
+                    .put("sys.clipboard.set")
+                    .put("sys.vibrate")
+                    .put("sys.notify")
+                    .put("notification.show")
+                    .put("notification.channel")
+                    .put("notification.remove")
+                    .put("ui.toast")
+                    .put("audio.info")
+                    .put("audio.volume")
+                    .put("audio.volume.list")
+                    .put("display.brightness")
+                    .put("camera.info")
+                    .put("camera.torch")
+                    .put("wifi.connection")
+                    .put("tts.engines")
+                    .put("tts.speak")
+                    .put("sensor.list")
+                    .put("sensor.read")
+                    .put("storage.info")
+                    .put("storage.list")
+                    .put("storage.read")
+                    .put("storage.write"));
         }
 
         private JSONObject sysInfo() throws Exception {
@@ -203,21 +276,208 @@ public final class TermuxAiSocketServer {
 
         private JSONObject notify(JSONObject args) throws Exception {
             String title = args.optString("title", "termux-ai");
-            String body = args.optString("body", "");
+            String body = args.optString("body", args.optString("text", ""));
+            String channel = args.optString("channel", CHANNEL_ID);
+            String id = args.optString("id", "1773");
             NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                nm.createNotificationChannel(new NotificationChannel(CHANNEL_ID, "Termux AI", NotificationManager.IMPORTANCE_DEFAULT));
+                nm.createNotificationChannel(new NotificationChannel(channel, channel, NotificationManager.IMPORTANCE_DEFAULT));
             }
             Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(context, CHANNEL_ID)
+                ? new Notification.Builder(context, channel)
                 : new Notification.Builder(context);
             Notification notification = builder
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle(title)
                 .setContentText(body)
+                .setOngoing(args.optBoolean("ongoing", false))
                 .build();
-            nm.notify(1773, notification);
-            return new JSONObject().put("status", "posted");
+            nm.notify(id.hashCode(), notification);
+            return new JSONObject().put("status", "posted").put("id", id).put("channel", channel);
+        }
+
+        private JSONObject notificationChannel(JSONObject args) throws Exception {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O)
+                return new JSONObject().put("status", "ignored").put("reason", "notification channels require Android 8+");
+            String id = args.optString("id", CHANNEL_ID);
+            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (args.optBoolean("delete", false)) {
+                nm.deleteNotificationChannel(id);
+                return new JSONObject().put("status", "deleted").put("id", id);
+            }
+            String name = args.optString("name", id);
+            nm.createNotificationChannel(new NotificationChannel(id, name, NotificationManager.IMPORTANCE_DEFAULT));
+            return new JSONObject().put("status", "created").put("id", id).put("name", name);
+        }
+
+        private JSONObject notificationRemove(JSONObject args) throws Exception {
+            String id = args.optString("id", "1773");
+            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.cancel(id.hashCode());
+            return new JSONObject().put("status", "removed").put("id", id);
+        }
+
+        private JSONObject toast(JSONObject args) throws Exception {
+            String text = args.optString("text", "");
+            boolean shortToast = args.optBoolean("short", false);
+            Toast.makeText(context, text, shortToast ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+            return new JSONObject().put("status", "shown").put("text", text);
+        }
+
+        private JSONObject audioInfo() throws Exception {
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            return new JSONObject()
+                .put("sample_rate", am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE))
+                .put("frames_per_buffer", am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER))
+                .put("bluetooth_a2dp_on", am.isBluetoothA2dpOn())
+                .put("wired_headset_on", am.isWiredHeadsetOn())
+                .put("speakerphone_on", am.isSpeakerphoneOn())
+                .put("music_active", am.isMusicActive());
+        }
+
+        private JSONObject audioVolume(JSONObject args) throws Exception {
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            String streamName = args.optString("stream", "music");
+            int stream = audioStream(streamName);
+            if (stream < 0) return new JSONObject().put("error", "Unknown audio stream: " + streamName);
+            if (args.has("volume")) {
+                int max = am.getStreamMaxVolume(stream);
+                int volume = Math.max(0, Math.min(args.optInt("volume", am.getStreamVolume(stream)), max));
+                am.setStreamVolume(stream, volume, 0);
+            }
+            return audioVolumeInfo(am, streamName, stream);
+        }
+
+        private JSONObject audioVolumeList() throws Exception {
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            JSONArray streams = new JSONArray();
+            String[] names = new String[]{"alarm", "music", "notification", "ring", "system", "call"};
+            for (String name : names) streams.put(audioVolumeInfo(am, name, audioStream(name)));
+            return new JSONObject().put("streams", streams);
+        }
+
+        private JSONObject brightness(JSONObject args) throws Exception {
+            boolean auto = args.optBoolean("auto", false) || "auto".equals(args.optString("mode", ""));
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(context)) {
+                return new JSONObject().put("error", "WRITE_SETTINGS permission is not granted");
+            }
+            if (auto) {
+                Settings.System.putInt(context.getContentResolver(), Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC);
+                return new JSONObject().put("mode", "auto");
+            }
+            int level = Math.max(0, Math.min(args.optInt("brightness", args.optInt("level", 0)), 255));
+            Settings.System.putInt(context.getContentResolver(), Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+            Settings.System.putInt(context.getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, level);
+            return new JSONObject().put("mode", "manual").put("brightness", level);
+        }
+
+        private JSONObject cameraInfo() throws Exception {
+            CameraManager manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            JSONArray cameras = new JSONArray();
+            for (String id : manager.getCameraIdList()) {
+                CameraCharacteristics c = manager.getCameraCharacteristics(id);
+                Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+                Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                cameras.put(new JSONObject()
+                    .put("id", id)
+                    .put("facing", cameraFacingName(facing))
+                    .put("flash_available", flash != null && flash));
+            }
+            return new JSONObject().put("cameras", cameras);
+        }
+
+        private JSONObject torch(JSONObject args) throws Exception {
+            boolean enabled = args.optBoolean("enabled", false);
+            CameraManager manager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            for (String id : manager.getCameraIdList()) {
+                CameraCharacteristics c = manager.getCameraCharacteristics(id);
+                Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                if (flash != null && flash) {
+                    manager.setTorchMode(id, enabled);
+                    return new JSONObject().put("status", enabled ? "on" : "off").put("camera", id);
+                }
+            }
+            return new JSONObject().put("error", "No camera with torch available");
+        }
+
+        private JSONObject wifiConnection() throws Exception {
+            WifiManager wm = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            WifiInfo info = wm.getConnectionInfo();
+            return new JSONObject()
+                .put("ssid", info == null ? "" : info.getSSID())
+                .put("bssid", info == null ? "" : info.getBSSID())
+                .put("rssi", info == null ? 0 : info.getRssi())
+                .put("link_speed_mbps", info == null ? 0 : info.getLinkSpeed())
+                .put("network_id", info == null ? -1 : info.getNetworkId())
+                .put("supplicant_state", info == null ? "" : String.valueOf(info.getSupplicantState()));
+        }
+
+        private JSONObject ttsEngines() throws Exception {
+            ensureTts(null);
+            JSONArray engines = new JSONArray();
+            for (TextToSpeech.EngineInfo engine : tts.getEngines()) {
+                engines.put(new JSONObject()
+                    .put("name", engine.name)
+                    .put("label", engine.label)
+                    .put("default", engine.name.equals(tts.getDefaultEngine())));
+            }
+            return new JSONObject().put("engines", engines);
+        }
+
+        private JSONObject ttsSpeak(JSONObject args) throws Exception {
+            String text = args.optString("text", "");
+            if (text.isEmpty()) return new JSONObject().put("error", "Missing text");
+            ensureTts(args.optString("engine", null));
+            tts.setPitch((float) args.optDouble("pitch", 1.0));
+            tts.setSpeechRate((float) args.optDouble("rate", 1.0));
+            String language = args.optString("language", "");
+            if (!language.isEmpty()) {
+                String region = args.optString("region", "");
+                String variant = args.optString("variant", "");
+                tts.setLanguage(new Locale(language, region, variant));
+            }
+            android.os.Bundle ttsParams = new android.os.Bundle();
+            String stream = args.optString("stream", "");
+            if (!stream.isEmpty()) {
+                int audioStream = audioStream(stream.toLowerCase(Locale.ROOT));
+                if (audioStream >= 0)
+                    ttsParams.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, audioStream);
+            }
+            int result = tts.speak(text, TextToSpeech.QUEUE_ADD, ttsParams, "termux-ai-tts");
+            return new JSONObject().put("queued", result == TextToSpeech.SUCCESS).put("chars", text.length());
+        }
+
+        private synchronized void ensureTts(String engine) throws Exception {
+            String desired = (engine == null || engine.isEmpty()) ? null : engine;
+            if (tts != null && ttsReady) {
+                if (desired == null || desired.equals(ttsEngine)) return;
+                tts.shutdown();
+                tts = null;
+                ttsReady = false;
+                ttsEngine = null;
+            }
+            CountDownLatch latch = new CountDownLatch(1);
+            ttsReady = false;
+            tts = desired == null
+                ? new TextToSpeech(context, status -> {
+                    ttsReady = status == TextToSpeech.SUCCESS;
+                    latch.countDown();
+                })
+                : new TextToSpeech(context, status -> {
+                    ttsReady = status == TextToSpeech.SUCCESS;
+                    latch.countDown();
+                }, desired);
+            if (!latch.await(10, TimeUnit.SECONDS) || !ttsReady) {
+                if (tts != null) {
+                    try { tts.shutdown(); } catch (Exception ignored) {}
+                    tts = null;
+                }
+                ttsEngine = null;
+                throw new IllegalStateException("TextToSpeech engine did not initialize");
+            }
+            ttsEngine = desired;
         }
 
         private JSONObject sensorList() throws Exception {
@@ -324,6 +584,35 @@ public final class TermuxAiSocketServer {
             return external == null
                 ? new File[]{context.getFilesDir(), context.getCacheDir()}
                 : new File[]{context.getFilesDir(), context.getCacheDir(), external};
+        }
+
+        private JSONObject audioVolumeInfo(AudioManager am, String name, int stream) throws Exception {
+            return new JSONObject()
+                .put("stream", name)
+                .put("volume", am.getStreamVolume(stream))
+                .put("max_volume", am.getStreamMaxVolume(stream));
+        }
+
+        private int audioStream(String stream) {
+            switch (stream) {
+                case "alarm": return AudioManager.STREAM_ALARM;
+                case "call": return AudioManager.STREAM_VOICE_CALL;
+                case "notification": return AudioManager.STREAM_NOTIFICATION;
+                case "ring": return AudioManager.STREAM_RING;
+                case "system": return AudioManager.STREAM_SYSTEM;
+                case "music": return AudioManager.STREAM_MUSIC;
+                default: return -1;
+            }
+        }
+
+        private String cameraFacingName(Integer facing) {
+            if (facing == null) return "unknown";
+            switch (facing) {
+                case CameraCharacteristics.LENS_FACING_BACK: return "back";
+                case CameraCharacteristics.LENS_FACING_FRONT: return "front";
+                case CameraCharacteristics.LENS_FACING_EXTERNAL: return "external";
+                default: return "unknown";
+            }
         }
 
         private String sensorTypeName(int type) {

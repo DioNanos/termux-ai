@@ -10,6 +10,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.termux.shared.data.IntentUtils;
+import com.termux.app.terminal.ai.TermuxAiCliInstaller;
+import com.termux.app.terminal.ai.TermuxAiSocketServer;
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxUtils;
 import com.termux.shared.termux.file.TermuxFileUtils;
@@ -41,6 +43,9 @@ public class SystemEventReceiver extends BroadcastReceiver {
             case Intent.ACTION_BOOT_COMPLETED:
                 onActionBootCompleted(context, intent);
                 break;
+            case Intent.ACTION_MY_PACKAGE_REPLACED:
+                onActionOwnPackageReplaced(context);
+                break;
             case Intent.ACTION_PACKAGE_ADDED:
             case Intent.ACTION_PACKAGE_REMOVED:
             case Intent.ACTION_PACKAGE_REPLACED:
@@ -62,6 +67,14 @@ public class SystemEventReceiver extends BroadcastReceiver {
                 " event received for \"" + data.toString().replaceAll("^package:", "") + "\"");
             if (TermuxFileUtils.isTermuxFilesDirectoryAccessible(context, false, false) == null)
                 TermuxShellEnvironment.writeEnvironmentToFile(context);
+        }
+    }
+
+    public synchronized void onActionOwnPackageReplaced(@NonNull Context context) {
+        if (TermuxFileUtils.isTermuxFilesDirectoryAccessible(context, false, false) == null) {
+            TermuxAiSocketServer.setup(context);
+            TermuxAiCliInstaller.installIfPossible(context);
+            TermuxShellEnvironment.writeEnvironmentToFile(context);
         }
     }
 

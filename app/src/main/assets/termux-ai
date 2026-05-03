@@ -1,9 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.6"
+VERSION="0.118.0-ai.7"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
+SELF="$(basename "$0")"
 
 json_escape() {
   sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -23,11 +24,22 @@ termux-ai: Android context helper for Termux AI Classic
 Usage:
   termux-ai --version
   termux-ai doctor
+  termux-ai api list
   termux-ai ping
   termux-ai info
   termux-ai battery
   termux-ai clipboard get
   termux-ai clipboard set TEXT
+  termux-ai tts speak TEXT
+  termux-ai tts engines
+  termux-ai toast TEXT
+  termux-ai volume [STREAM VOLUME]
+  termux-ai audio info
+  termux-ai brightness LEVEL|auto
+  termux-ai torch on|off
+  termux-ai camera info
+  termux-ai notify TITLE BODY
+  termux-ai wifi connection
 
 Output is compact JSON by default.
 EOF
@@ -79,7 +91,170 @@ run_broadcast() {
   esac
 }
 
+read_stdin_or_args() {
+  if [ "$#" -gt 0 ]; then
+    printf '%s' "$*"
+  else
+    cat
+  fi
+}
+
+api_compat() {
+  local method="${1:-}"
+  if [ -n "$method" ]; then shift || true; fi
+  case "$method" in
+    AudioInfo) run_broadcast audio.info "$@" ;;
+    BatteryStatus) run_broadcast sys.battery "$@" ;;
+    Brightness) run_broadcast display.brightness "$@" ;;
+    CameraInfo) run_broadcast camera.info "$@" ;;
+    Clipboard) run_broadcast "${1:-sys.clipboard.get}" "${@:2}" ;;
+    Notification) run_broadcast notification.show "$@" ;;
+    NotificationChannel) run_broadcast notification.channel "$@" ;;
+    NotificationRemove) run_broadcast notification.remove "$@" ;;
+    TextToSpeech)
+      if [ "${1:-}" = "LIST_AVAILABLE" ]; then
+        run_broadcast tts.engines
+      else
+        run_broadcast tts.speak "$@"
+      fi
+      ;;
+    Toast) run_broadcast ui.toast "$@" ;;
+    Torch) run_broadcast camera.torch "$@" ;;
+    Vibrate) run_broadcast sys.vibrate "$@" ;;
+    Volume) run_broadcast "${1:-audio.volume.list}" "${@:2}" ;;
+    WifiConnectionInfo) run_broadcast wifi.connection "$@" ;;
+    *) fail_json "Unsupported internal API method: $method" ;;
+  esac
+}
+
+compat_main() {
+  case "$SELF" in
+    termux-api)
+      api_compat "$@"
+      ;;
+    termux-audio-info)
+      run_broadcast audio.info
+      ;;
+    termux-battery-status)
+      run_broadcast sys.battery
+      ;;
+    termux-brightness)
+      [ "$#" -eq 1 ] || fail_json "Usage: termux-brightness brightness|auto"
+      if [ "$1" = "auto" ]; then run_broadcast display.brightness --ez auto true; else run_broadcast display.brightness --ei brightness "$1"; fi
+      ;;
+    termux-camera-info)
+      run_broadcast camera.info
+      ;;
+    termux-clipboard-get)
+      run_broadcast sys.clipboard.get
+      ;;
+    termux-clipboard-set)
+      run_broadcast sys.clipboard.set --es text "$(read_stdin_or_args "$@")"
+      ;;
+    termux-notification)
+      local title="termux-ai" content="" id="1773" channel="termux_ai_bridge" ongoing="false"
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -t|--title) title="$2"; shift 2 ;;
+          -c|--content) content="$2"; shift 2 ;;
+          -i|--id) id="$2"; shift 2 ;;
+          --channel) channel="$2"; shift 2 ;;
+          --ongoing) ongoing="true"; shift ;;
+          -h|--help) printf 'Usage: termux-notification [-t title] [-c content] [-i id] [--channel id] [--ongoing]\n'; exit 0 ;;
+          *) fail_json "Unsupported termux-notification option: $1" ;;
+        esac
+      done
+      [ -n "$content" ] || content="$(read_stdin_or_args)"
+      run_broadcast notification.show --es title "$title" --es text "$content" --es id "$id" --es channel "$channel" --ez ongoing "$ongoing"
+      ;;
+    termux-notification-channel)
+      if [ "${1:-}" = "-d" ]; then
+        [ "$#" -eq 2 ] || fail_json "Usage: termux-notification-channel -d channel-id"
+        run_broadcast notification.channel --ez delete true --es id "$2"
+      else
+        [ "$#" -eq 2 ] || fail_json "Usage: termux-notification-channel channel-id channel-name"
+        run_broadcast notification.channel --es id "$1" --es name "$2"
+      fi
+      ;;
+    termux-notification-remove)
+      [ "$#" -eq 1 ] || fail_json "Usage: termux-notification-remove notification-id"
+      run_broadcast notification.remove --es id "$1"
+      ;;
+    termux-toast)
+      local short="false"
+      while getopts :hs option; do
+        case "$option" in
+          h) printf 'Usage: termux-toast [-s] [text]\n'; exit 0 ;;
+          s) short="true" ;;
+          ?) fail_json "Illegal option -$OPTARG" ;;
+        esac
+      done
+      shift $((OPTIND-1))
+      run_broadcast ui.toast --ez short "$short" --es text "$(read_stdin_or_args "$@")"
+      ;;
+    termux-torch)
+      [ "$#" -eq 1 ] || fail_json "Usage: termux-torch on|off"
+      case "$1" in
+        on) run_broadcast camera.torch --ez enabled true ;;
+        off) run_broadcast camera.torch --ez enabled false ;;
+        *) fail_json "Usage: termux-torch on|off" ;;
+      esac
+      ;;
+    termux-tts-engines)
+      run_broadcast tts.engines
+      ;;
+    termux-tts-speak)
+      local args=()
+      while getopts :he:l:n:v:p:r:s: option; do
+        case "$option" in
+          h) printf 'Usage: termux-tts-speak [-e engine] [-l language] [-n region] [-v variant] [-p pitch] [-r rate] [-s stream] [text]\n'; exit 0 ;;
+          e) args+=(--es engine "$OPTARG") ;;
+          l) args+=(--es language "$OPTARG") ;;
+          n) args+=(--es region "$OPTARG") ;;
+          v) args+=(--es variant "$OPTARG") ;;
+          p) args+=(--ef pitch "$OPTARG") ;;
+          r) args+=(--ef rate "$OPTARG") ;;
+          s) args+=(--es stream "$OPTARG") ;;
+          ?) fail_json "Illegal option -$OPTARG" ;;
+        esac
+      done
+      shift $((OPTIND-1))
+      run_broadcast tts.speak "${args[@]}" --es text "$(read_stdin_or_args "$@")"
+      ;;
+    termux-vibrate)
+      local duration=1000
+      while getopts :hd: option; do
+        case "$option" in
+          h) printf 'Usage: termux-vibrate [-d duration_ms]\n'; exit 0 ;;
+          d) duration="$OPTARG" ;;
+          ?) fail_json "Illegal option -$OPTARG" ;;
+        esac
+      done
+      run_broadcast sys.vibrate --ei duration_ms "$duration"
+      ;;
+    termux-volume)
+      if [ "$#" -eq 0 ]; then
+        run_broadcast audio.volume.list
+      elif [ "$#" -eq 2 ]; then
+        run_broadcast audio.volume --es stream "$1" --ei volume "$2"
+      else
+        fail_json "Usage: termux-volume [stream volume]"
+      fi
+      ;;
+    termux-wifi-connectioninfo)
+      run_broadcast wifi.connection
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 main() {
+  if compat_main "$@"; then
+    return
+  fi
+
   local command="${1:-}"
   if [ -n "$command" ]; then
     shift || true
@@ -94,6 +269,12 @@ main() {
       ;;
     doctor)
       run_broadcast bridge.version
+      ;;
+    api)
+      case "${1:-}" in
+        list) run_broadcast api.list ;;
+        *) fail_json "Usage: termux-ai api list" ;;
+      esac
       ;;
     ping)
       run_broadcast ping
@@ -117,6 +298,54 @@ main() {
           fail_json "Usage: termux-ai clipboard get|set TEXT"
           ;;
       esac
+      ;;
+    tts)
+      case "${1:-}" in
+        engines) run_broadcast tts.engines ;;
+        speak) shift || true; run_broadcast tts.speak --es text "$(read_stdin_or_args "$@")" ;;
+        *) fail_json "Usage: termux-ai tts engines|speak TEXT" ;;
+      esac
+      ;;
+    toast)
+      run_broadcast ui.toast --es text "$(read_stdin_or_args "$@")"
+      ;;
+    volume)
+      if [ "$#" -eq 0 ]; then
+        run_broadcast audio.volume.list
+      elif [ "$#" -eq 2 ]; then
+        run_broadcast audio.volume --es stream "$1" --ei volume "$2"
+      else
+        fail_json "Usage: termux-ai volume [stream volume]"
+      fi
+      ;;
+    audio)
+      [ "${1:-}" = "info" ] || fail_json "Usage: termux-ai audio info"
+      run_broadcast audio.info
+      ;;
+    brightness)
+      [ "$#" -eq 1 ] || fail_json "Usage: termux-ai brightness LEVEL|auto"
+      if [ "$1" = "auto" ]; then run_broadcast display.brightness --ez auto true; else run_broadcast display.brightness --ei brightness "$1"; fi
+      ;;
+    torch)
+      [ "$#" -eq 1 ] || fail_json "Usage: termux-ai torch on|off"
+      case "$1" in
+        on) run_broadcast camera.torch --ez enabled true ;;
+        off) run_broadcast camera.torch --ez enabled false ;;
+        *) fail_json "Usage: termux-ai torch on|off" ;;
+      esac
+      ;;
+    camera)
+      [ "${1:-}" = "info" ] || fail_json "Usage: termux-ai camera info"
+      run_broadcast camera.info
+      ;;
+    notify)
+      local title="${1:-termux-ai}"
+      shift || true
+      run_broadcast notification.show --es title "$title" --es text "$*"
+      ;;
+    wifi)
+      [ "${1:-}" = "connection" ] || fail_json "Usage: termux-ai wifi connection"
+      run_broadcast wifi.connection
       ;;
     "")
       usage
