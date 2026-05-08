@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.7"
+VERSION="0.118.0-ai.8-aicore-tier1"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
 SELF="$(basename "$0")"
@@ -40,6 +40,8 @@ Usage:
   termux-ai camera info
   termux-ai notify TITLE BODY
   termux-ai wifi connection
+  termux-ai aicore info
+  termux-ai aicore generate [--max-tokens N] [--temperature F] [--text|--json] PROMPT
 
 Output is compact JSON by default.
 EOF
@@ -346,6 +348,42 @@ main() {
     wifi)
       [ "${1:-}" = "connection" ] || fail_json "Usage: termux-ai wifi connection"
       run_broadcast wifi.connection
+      ;;
+    aicore)
+      local sub="${1:-info}"
+      shift || true
+      case "$sub" in
+        info)
+          run_broadcast aicore.info
+          ;;
+        generate)
+          local prompt="" max_tokens=256 temperature=0.2 mode="text"
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --max-tokens) max_tokens="$2"; shift 2 ;;
+              --temperature) temperature="$2"; shift 2 ;;
+              --json) mode="json"; shift ;;
+              --text) mode="text"; shift ;;
+              --) shift; prompt="$*"; break ;;
+              -) prompt="$(cat -)"; shift ;;
+              *) prompt="$*"; break ;;
+            esac
+          done
+          [ -n "$prompt" ] || prompt="$(cat -)"
+          [ -n "$prompt" ] || fail_json "Usage: termux-ai aicore generate [--max-tokens N] [--temperature F] [--json] PROMPT"
+          local raw
+          raw="$(run_broadcast aicore.generate --es prompt "$prompt" --ei max_tokens "$max_tokens" --ef temperature "$temperature" 2>&1)" || { printf '%s\n' "$raw"; exit 1; }
+          if [ "$mode" = "json" ]; then
+            printf '%s\n' "$raw"
+          else
+            # Best-effort extraction of data.text without external deps; falls back to raw on error.
+            printf '%s' "$raw" | sed -n 's/.*"text":"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\n/\n/g; s/\\"/"/g; s/\\\\/\\/g'
+          fi
+          ;;
+        *)
+          fail_json "Usage: termux-ai aicore info|generate"
+          ;;
+      esac
       ;;
     "")
       usage

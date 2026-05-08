@@ -12,6 +12,17 @@
         android:name="android.software.leanback"
         android:required="false" />
 
+    <!-- ML Kit AICore (com.google.ai.edge.aicore:aicore) declares minSdk 31. termux-ai keeps
+         minSdk 24 (classic Termux) and runtime-guards every AICore callsite. -->
+    <uses-sdk tools:overrideLibrary="com.google.ai.edge.aicore" />
+
+    <!-- Bind permission for the AICore system service; query the system AICore package. -->
+    <uses-permission android:name="com.google.android.apps.aicore.service.BIND_SERVICE" />
+
+    <queries>
+        <package android:name="com.google.android.aicore" />
+    </queries>
+
     <permission
         android:name="${TERMUX_PACKAGE_NAME}.permission.RUN_COMMAND"
         android:description="@string/permission_run_command_description"

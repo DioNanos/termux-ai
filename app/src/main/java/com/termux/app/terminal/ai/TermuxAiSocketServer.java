@@ -47,7 +47,7 @@ public final class TermuxAiSocketServer {
 
     public static final String LOG_TAG = "TermuxAiSocketServer";
     public static final String TITLE = "TermuxAi";
-    public static final String VERSION = "0.2.0";
+    public static final String VERSION = "0.3.0";
     public static final String SOCKET_FILE_PATH =
         TermuxConstants.TERMUX_APP.APPS_DIR_PATH + "/termux-ai/ai.sock";
     private static final String CHANNEL_ID = "termux_ai_bridge";
@@ -180,6 +180,10 @@ public final class TermuxAiSocketServer {
                         return ok(storageRead(args));
                     case "storage.write":
                         return ok(storageWrite(args));
+                    case "aicore.info":
+                        return ok(aicoreInfo());
+                    case "aicore.generate":
+                        return ok(aicoreGenerate(args));
                     default:
                         return error("Unknown command: " + cmd);
                 }
@@ -219,7 +223,9 @@ public final class TermuxAiSocketServer {
                     .put("storage.info")
                     .put("storage.list")
                     .put("storage.read")
-                    .put("storage.write"));
+                    .put("storage.write")
+                    .put("aicore.info")
+                    .put("aicore.generate"));
         }
 
         private JSONObject sysInfo() throws Exception {
@@ -639,6 +645,45 @@ public final class TermuxAiSocketServer {
                 case "magnetic_field": return Sensor.TYPE_MAGNETIC_FIELD;
                 default: return 0;
             }
+        }
+
+        private JSONObject aicoreInfo() throws Exception {
+            boolean sdkOk = AICoreBackend.isSdkSupported();
+            boolean available = sdkOk && AICoreBackend.isAvailable();
+            JSONObject json = new JSONObject()
+                .put("available", available)
+                .put("sdk_int", Build.VERSION.SDK_INT)
+                .put("model_id", "gemini-nano")
+                .put("backend", "mlkit-aicore")
+                .put("aicore_version", "0.0.1-exp02")
+                .put("supports_streaming", true)
+                .put("supports_tools", false);
+            String err = AICoreBackend.lastInitError();
+            if (!available && err != null) json.put("error", err);
+            if (!sdkOk) json.put("error", "Android < 12 (API " + Build.VERSION.SDK_INT + ")");
+            return json;
+        }
+
+        private JSONObject aicoreGenerate(JSONObject args) throws Exception {
+            if (!AICoreBackend.isSdkSupported())
+                throw new IllegalStateException("AICore requires Android 12+");
+            String prompt = args.optString("prompt", "").trim();
+            if (prompt.isEmpty()) throw new IllegalArgumentException("prompt is required");
+            int maxTokens = Math.max(1, Math.min(args.optInt("max_tokens", 256), 4096));
+            float temperature = (float) args.optDouble("temperature", 0.2);
+
+            long start = System.currentTimeMillis();
+            String text = AICoreBackend.generate(prompt, maxTokens, temperature);
+            long latencyMs = System.currentTimeMillis() - start;
+
+            return new JSONObject()
+                .put("text", text == null ? "" : text)
+                .put("model", "gemini-nano")
+                .put("finish_reason", "stop")
+                .put("usage", new JSONObject()
+                    .put("input_tokens_approx", prompt.length() / 4)
+                    .put("output_tokens_approx", text == null ? 0 : text.length() / 4))
+                .put("latency_ms", latencyMs);
         }
 
         private String ok(JSONObject data) {
