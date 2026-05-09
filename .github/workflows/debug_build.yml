@@ -3,10 +3,12 @@ name: Build
 on:
   push:
     branches:
+      - develop
       - master
       - 'github-releases/**'
   pull_request:
     branches:
+      - develop
       - master
 
 jobs:
