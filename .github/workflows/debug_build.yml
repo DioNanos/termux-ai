@@ -13,7 +13,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: vps3-docker-light
     strategy:
       fail-fast: false
       matrix:
