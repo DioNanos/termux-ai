@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.11"
+VERSION="0.118.0-ai.12"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
 SELF="$(basename "$0")"
@@ -40,9 +40,10 @@ Usage:
   termux-ai camera info
   termux-ai notify TITLE BODY
   termux-ai wifi connection
-  termux-ai aicore info [--stage stable|preview] [--preference full|fast]
+  termux-ai aicore info
   termux-ai aicore models
-  termux-ai aicore generate [--max-tokens N] [--temperature F] [--stage stable|preview] [--preference full|fast] [--gemma4] [--text|--json] PROMPT
+  termux-ai aicore download
+  termux-ai aicore generate [--max-tokens N] [--temperature F] PROMPT
 
 Output is compact JSON by default.
 EOF
@@ -368,29 +369,20 @@ main() {
       shift || true
       case "$sub" in
         info)
-          local stage="stable" preference="full"
-          while [ "$#" -gt 0 ]; do
-            case "$1" in
-              --stage) stage="$2"; shift 2 ;;
-              --preference) preference="$2"; shift 2 ;;
-              *) shift ;;
-            esac
-          done
-          run_broadcast aicore.info --es stage "$stage" --es preference "$preference"
+          run_broadcast aicore.info
           ;;
         models)
           run_broadcast aicore.models
           ;;
+        download)
+          run_socket '{"cmd":"aicore.download"}'
+          ;;
         generate)
-          local prompt="" max_tokens=256 temperature=0.2 mode="text" stage="stable" preference="full"
+          local prompt="" max_tokens=256 temperature=0.2 mode="text"
           while [ "$#" -gt 0 ]; do
             case "$1" in
               --max-tokens) max_tokens="$2"; shift 2 ;;
               --temperature) temperature="$2"; shift 2 ;;
-              --stage) stage="$2"; shift 2 ;;
-              --preference) preference="$2"; shift 2 ;;
-              --gemma4) stage="preview"; preference="full"; shift ;;
-              --e2b) stage="preview"; preference="fast"; shift ;;
               --json) mode="json"; shift ;;
               --text) mode="text"; shift ;;
               --) shift; prompt="$*"; break ;;
@@ -399,23 +391,21 @@ main() {
             esac
           done
           [ -n "$prompt" ] || prompt="$(cat -)"
-          [ -n "$prompt" ] || fail_json "Usage: termux-ai aicore generate [--max-tokens N] [--temperature F] [--stage stable|preview] [--preference full|fast] [--gemma4] [--json] PROMPT"
+          [ -n "$prompt" ] || fail_json "Usage: termux-ai aicore generate [--max-tokens N] [--temperature F] PROMPT"
 
-          # Try socket first (ANR-safe for long inference), fall back to broadcast
           local raw=""
-          local payload="{\"cmd\":\"aicore.generate\",\"args\":{\"prompt\":$(printf '%s' "$prompt" | json_escape | sed 's/^/"/;s/$/"/'),\"max_tokens\":$max_tokens,\"temperature\":$temperature,\"stage\":\"$stage\",\"preference\":\"$preference\"}}"
+          local payload="{\"cmd\":\"aicore.generate\",\"args\":{\"prompt\":$(printf '%s' "$prompt" | json_escape | sed 's/^/"/;s/$/"/'),\"max_tokens\":$max_tokens,\"temperature\":$temperature}}"
           raw="$(run_socket "$payload" 2>/dev/null)" || {
-            raw="$(run_broadcast aicore.generate --es prompt "$prompt" --ei max_tokens "$max_tokens" --ef temperature "$temperature" --es stage "$stage" --es preference "$preference" 2>&1)" || { printf '%s\n' "$raw"; exit 1; }
+            raw="$(run_broadcast aicore.generate --es prompt "$prompt" --ei max_tokens "$max_tokens" --ef temperature "$temperature" 2>&1)" || { printf '%s\n' "$raw"; exit 1; }
           }
           if [ "$mode" = "json" ]; then
             printf '%s\n' "$raw"
           else
-            # Best-effort extraction of data.text without external deps; falls back to raw on error.
             printf '%s' "$raw" | sed -n 's/.*"text":"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\n/\n/g; s/\\"/"/g; s/\\\\/\\/g'
           fi
           ;;
         *)
-          fail_json "Usage: termux-ai aicore info|models|generate"
+          fail_json "Usage: termux-ai aicore info|models|download|generate"
           ;;
       esac
       ;;

@@ -186,6 +186,8 @@ public final class TermuxAiSocketServer {
                         return ok(aicoreModels());
                     case "aicore.generate":
                         return ok(aicoreGenerate(args));
+                    case "aicore.download":
+                        return ok(aicoreDownload());
                     default:
                         return error("Unknown command: " + cmd);
                 }
@@ -228,7 +230,8 @@ public final class TermuxAiSocketServer {
                     .put("storage.write")
                     .put("aicore.info")
                     .put("aicore.models")
-                    .put("aicore.generate"));
+                    .put("aicore.generate")
+                    .put("aicore.download"));
         }
 
         private JSONObject sysInfo() throws Exception {
@@ -673,6 +676,12 @@ public final class TermuxAiSocketServer {
         private JSONObject aicoreModels() throws Exception {
             return new JSONObject()
                 .put("models", AICoreBackend.modelsInfo(context));
+        }
+
+        private JSONObject aicoreDownload() throws Exception {
+            if (!AICoreBackend.isSdkSupported())
+                throw new IllegalStateException("AICore requires Android 12+");
+            return AICoreBackend.download(context);
         }
 
         private JSONObject aicoreGenerate(JSONObject args) throws Exception {

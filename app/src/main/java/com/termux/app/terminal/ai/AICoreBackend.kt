@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -180,6 +181,29 @@ object AICoreBackend {
         }
         inflight[requestId] = job
         return requestId
+    }
+
+    @JvmStatic
+    fun download(context: Context): JSONObject {
+        if (!isSdkSupported()) throw IllegalStateException("Android < 12 not supported")
+        storeContext(context)
+        val model = getDefaultModel()
+        return try {
+            runBlocking(Dispatchers.IO) {
+                model.download().collect { status ->
+                    Log.i(TAG, "download: $status")
+                }
+            }
+            val result = checkStatus()
+            JSONObject()
+                .put("ok", true)
+                .put("status", statusName(result.status))
+                .put("available", result.available)
+        } catch (t: Throwable) {
+            JSONObject()
+                .put("ok", false)
+                .put("error", "${t.javaClass.simpleName}: ${t.message ?: ""}")
+        }
     }
 
     @JvmStatic
