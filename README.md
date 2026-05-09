@@ -4,8 +4,8 @@
 > It keeps the normal Termux environment and adds a small compatibility layer for
 > phone-first use with Codex, Gemini CLI, Qwen Code, and similar terminal tools.
 
-[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
-[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/v0.118.0-ai.7/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
+[![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/latest)
+[![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/latest/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/latest)
 [![Android 7+](https://img.shields.io/badge/Android-7%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#install)
 [![target SDK 28](https://img.shields.io/badge/target%20SDK-28-blue?style=flat-square)](#classic-compatibility)
 [![license](https://img.shields.io/github/license/DioNanos/termux-ai?style=flat-square)](./LICENSE.md)
@@ -14,7 +14,7 @@
 
 Download the latest APK from:
 
-- [GitHub release v0.118.0-ai.7](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
+- [Latest GitHub release](https://github.com/DioNanos/termux-ai/releases/latest)
 
 Requirements:
 
@@ -99,6 +99,8 @@ termux-ai torch off
 termux-ai camera info
 termux-ai notify "Termux AI" "task finished"
 termux-ai wifi connection
+termux-ai aicore info
+termux-ai aicore generate "say hello"
 ```
 
 Output is compact JSON by default. Commands return exit code `0` only when the
@@ -138,13 +140,13 @@ listener access are not part of this public release.
 
 ## Releases
 
-- Current GitHub release: [v0.118.0-ai.7](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.7)
+- Current GitHub release: [v0.118.0-ai.11](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.11)
 - Current line: `0.118.0-ai.x`
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
 
-`v0.118.0-ai.7` is the first release with internal Termux:API-compatible
-helpers for common AI CLI workflows.
+`v0.118.0-ai.11` adds on-device AI inference via Google AICore (ML Kit GenAI
+Prompt API) with ANR-safe socket transport.
 
 ## Build
 
