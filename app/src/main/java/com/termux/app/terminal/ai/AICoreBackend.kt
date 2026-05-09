@@ -56,9 +56,9 @@ object AICoreBackend {
             val model = getDefaultModel()
             val status = runBlocking(Dispatchers.IO) { model.checkStatus() }
             when (status) {
-                2 -> StatusResult(true, status, null)
+                2 -> StatusResult(false, status, "model downloading")
                 1 -> StatusResult(false, status, "model downloadable but not downloaded")
-                3 -> StatusResult(false, status, "model downloading")
+                3 -> StatusResult(true, status, null)
                 else -> StatusResult(false, status, "unavailable (status=$status)")
             }
         } catch (t: Throwable) {
@@ -219,9 +219,9 @@ object AICoreBackend {
     }
 
     private fun statusName(status: Int): String = when (status) {
-        2 -> "AVAILABLE"
+        2 -> "DOWNLOADING"
         1 -> "DOWNLOADABLE"
-        3 -> "DOWNLOADING"
+        3 -> "AVAILABLE"
         else -> "UNAVAILABLE"
     }
 }
