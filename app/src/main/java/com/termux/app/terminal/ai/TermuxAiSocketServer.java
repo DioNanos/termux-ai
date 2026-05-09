@@ -181,7 +181,9 @@ public final class TermuxAiSocketServer {
                     case "storage.write":
                         return ok(storageWrite(args));
                     case "aicore.info":
-                        return ok(aicoreInfo());
+                        return ok(aicoreInfo(args));
+                    case "aicore.models":
+                        return ok(aicoreModels());
                     case "aicore.generate":
                         return ok(aicoreGenerate(args));
                     default:
@@ -225,6 +227,7 @@ public final class TermuxAiSocketServer {
                     .put("storage.read")
                     .put("storage.write")
                     .put("aicore.info")
+                    .put("aicore.models")
                     .put("aicore.generate"));
         }
 
@@ -647,21 +650,29 @@ public final class TermuxAiSocketServer {
             }
         }
 
-        private JSONObject aicoreInfo() throws Exception {
+        private JSONObject aicoreInfo(JSONObject args) throws Exception {
             boolean sdkOk = AICoreBackend.isSdkSupported();
-            boolean available = sdkOk && AICoreBackend.isAvailable(context);
+            int stage = parseStage(args.optString("stage", "stable"));
+            int preference = parsePreference(args.optString("preference", "full"));
+            boolean available = sdkOk && AICoreBackend.isAvailable(context, stage, preference);
             JSONObject json = new JSONObject()
                 .put("available", available)
                 .put("sdk_int", Build.VERSION.SDK_INT)
-                .put("model_id", "gemini-nano")
-                .put("backend", "mlkit-aicore")
-                .put("aicore_version", "0.0.1-exp02")
+                .put("stage", args.optString("stage", "stable"))
+                .put("preference", args.optString("preference", "full"))
+                .put("backend", "mlkit-genai-prompt")
+                .put("sdk_version", "1.0.0-beta2")
                 .put("supports_streaming", true)
                 .put("supports_tools", false);
             String err = AICoreBackend.lastInitError();
             if (!available && err != null) json.put("error", err);
             if (!sdkOk) json.put("error", "Android < 12 (API " + Build.VERSION.SDK_INT + ")");
             return json;
+        }
+
+        private JSONObject aicoreModels() throws Exception {
+            return new JSONObject()
+                .put("models", AICoreBackend.modelsInfo(context));
         }
 
         private JSONObject aicoreGenerate(JSONObject args) throws Exception {
@@ -671,19 +682,24 @@ public final class TermuxAiSocketServer {
             if (prompt.isEmpty()) throw new IllegalArgumentException("prompt is required");
             int maxTokens = Math.max(1, Math.min(args.optInt("max_tokens", 256), 4096));
             float temperature = (float) args.optDouble("temperature", 0.2);
+            int stage = parseStage(args.optString("stage", "stable"));
+            int preference = parsePreference(args.optString("preference", "full"));
 
-            long start = System.currentTimeMillis();
-            String text = AICoreBackend.generate(context, prompt, maxTokens, temperature);
-            long latencyMs = System.currentTimeMillis() - start;
+            return AICoreBackend.generate(context, prompt, maxTokens, temperature, stage, preference);
+        }
 
-            return new JSONObject()
-                .put("text", text == null ? "" : text)
-                .put("model", "gemini-nano")
-                .put("finish_reason", "stop")
-                .put("usage", new JSONObject()
-                    .put("input_tokens_approx", prompt.length() / 4)
-                    .put("output_tokens_approx", text == null ? 0 : text.length() / 4))
-                .put("latency_ms", latencyMs);
+        private int parseStage(String s) {
+            switch (s.toLowerCase()) {
+                case "preview": return 1; // ModelReleaseStage.PREVIEW
+                default: return 0; // ModelReleaseStage.STABLE
+            }
+        }
+
+        private int parsePreference(String s) {
+            switch (s.toLowerCase()) {
+                case "fast": return 1; // ModelPreference.FAST
+                default: return 0; // ModelPreference.FULL
+            }
         }
 
         private String ok(JSONObject data) {

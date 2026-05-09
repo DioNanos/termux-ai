@@ -60,17 +60,18 @@ android {
         implementation project(":terminal-view")
         implementation project(":termux-shared")
 
-        // ML Kit GenAI Prompt API (AICore / Gemini Nano on Pixel 8/9, Gemma 4 when available).
-        // AAR declares minSdk 31; we override at manifest merge level and runtime-guard every callsite
-        // so termux-ai keeps minSdk 24 and targetSdk 28 unchanged.
-        implementation "com.google.ai.edge.aicore:aicore:0.0.1-exp02"
+        // ML Kit GenAI Prompt API — official artifact (replaces experimental aicore:0.0.1-exp02).
+        // Supports ModelConfig with stage (STABLE/PREVIEW) and preference (FULL/FAST),
+        // checkStatus(), download(), generateContent(), generateContentStream(), countTokens().
+        // AAR declares minSdk 26; we runtime-guard for API 31+ where AICore service exists.
+        implementation "com.google.mlkit:genai-prompt:1.0.0-beta2"
     }
 
     defaultConfig {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 124
-        versionName "0.118.0-ai.9"
+        versionCode 125
+        versionName "0.118.0-ai.10"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
