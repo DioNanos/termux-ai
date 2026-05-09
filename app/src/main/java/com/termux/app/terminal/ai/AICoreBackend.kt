@@ -52,6 +52,7 @@ object AICoreBackend {
 
     private fun checkStatus(): StatusResult {
         return try {
+            defaultModel = null  // reset cache for fresh AICore status on every check
             val model = getDefaultModel()
             val status = runBlocking(Dispatchers.IO) { model.checkStatus() }
             when (status) {

@@ -375,7 +375,7 @@ main() {
           run_broadcast aicore.models
           ;;
         download)
-          run_socket '{"cmd":"aicore.download"}'
+          run_socket '{"cmd":"aicore.download"}' || run_broadcast aicore.download
           ;;
         generate)
           local prompt="" max_tokens=256 temperature=0.2 mode="text"
