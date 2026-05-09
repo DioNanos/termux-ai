@@ -5,11 +5,7 @@ import android.os.Build
 import android.util.Log
 import com.google.mlkit.genai.prompt.GenerateContentResponse
 import com.google.mlkit.genai.prompt.Generation
-import com.google.mlkit.genai.prompt.GenerationConfig
 import com.google.mlkit.genai.prompt.GenerativeModel
-import com.google.mlkit.genai.prompt.ModelConfig
-import com.google.mlkit.genai.prompt.ModelPreference
-import com.google.mlkit.genai.prompt.ModelReleaseStage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,17 +20,13 @@ import java.util.concurrent.atomic.AtomicReference
 object AICoreBackend {
 
     private const val TAG = "AICoreBackend"
-    private const val STATUS_UNAVAILABLE = 0
-    private const val STATUS_DOWNLOADABLE = 1
-    private const val STATUS_AVAILABLE = 2
-    private const val STATUS_DOWNLOADING = 3
 
     private val lastError = AtomicReference<String?>(null)
-    private val modelCache = ConcurrentHashMap<String, GenerativeModel>()
     private val streamScope = CoroutineScope(Dispatchers.Default)
     private val inflight = ConcurrentHashMap<String, Job>()
 
     @Volatile private var appContext: Context? = null
+    @Volatile private var defaultModel: GenerativeModel? = null
 
     @JvmStatic
     fun isSdkSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -48,33 +40,23 @@ object AICoreBackend {
         }
     }
 
-    private fun modelKey(stage: Int, preference: Int): String = "${stage}:${preference}"
-
-    private fun getModel(stage: Int, pref: Int): GenerativeModel {
-        val key = modelKey(stage, pref)
-        modelCache[key]?.let { return it }
-        val mc = ModelConfig.Builder().apply {
-            releaseStage = stage
-            preference = pref
-        }.build()
-        val config = GenerationConfig.Builder().apply {
-            modelConfig = mc
-        }.build()
-        val model = Generation.getClient(config)
-        modelCache[key] = model
+    private fun getDefaultModel(): GenerativeModel {
+        defaultModel?.let { return it }
+        val model = Generation.getClient()
+        defaultModel = model
         return model
     }
 
     private data class StatusResult(val available: Boolean, val status: Int, val error: String?)
 
-    private fun checkModelStatus(stage: Int, preference: Int): StatusResult {
+    private fun checkStatus(): StatusResult {
         return try {
-            val model = getModel(stage, preference)
+            val model = getDefaultModel()
             val status = runBlocking(Dispatchers.IO) { model.checkStatus() }
             when (status) {
-                STATUS_AVAILABLE -> StatusResult(true, status, null)
-                STATUS_DOWNLOADABLE -> StatusResult(false, status, "model downloadable but not downloaded")
-                STATUS_DOWNLOADING -> StatusResult(false, status, "model downloading")
+                2 -> StatusResult(true, status, null)
+                1 -> StatusResult(false, status, "model downloadable but not downloaded")
+                3 -> StatusResult(false, status, "model downloading")
                 else -> StatusResult(false, status, "unavailable (status=$status)")
             }
         } catch (t: Throwable) {
@@ -84,12 +66,18 @@ object AICoreBackend {
 
     @JvmStatic
     fun isAvailable(context: Context, stage: Int, preference: Int): Boolean {
+        // ModelConfig-based selection not supported; use default model
+        return isAvailable(context)
+    }
+
+    @JvmStatic
+    fun isAvailable(context: Context): Boolean {
         if (!isSdkSupported()) {
             lastError.set("Android < 12 (API ${Build.VERSION.SDK_INT})")
             return false
         }
         storeContext(context)
-        val result = checkModelStatus(stage, preference)
+        val result = checkStatus()
         if (!result.available) {
             lastError.set(result.error)
         } else {
@@ -99,29 +87,15 @@ object AICoreBackend {
     }
 
     @JvmStatic
-    fun isAvailable(context: Context): Boolean =
-        isAvailable(context, ModelReleaseStage.STABLE, ModelPreference.FULL)
-
-    @JvmStatic
     fun modelsInfo(context: Context): JSONArray {
         storeContext(context)
-        val variants = arrayOf(
-            Triple(ModelReleaseStage.STABLE, ModelPreference.FULL, "stable" to "full"),
-            Triple(ModelReleaseStage.PREVIEW, ModelPreference.FULL, "preview" to "full"),
-            Triple(ModelReleaseStage.PREVIEW, ModelPreference.FAST, "preview" to "fast"),
-        )
-        val arr = JSONArray()
-        for ((stage, pref, names) in variants) {
-            val result = checkModelStatus(stage, pref)
-            val obj = JSONObject()
-                .put("stage", names.first)
-                .put("preference", names.second)
-                .put("status", statusName(result.status))
-                .put("available", result.available)
-            if (result.error != null) obj.put("error", result.error)
-            arr.put(obj)
-        }
-        return arr
+        val result = checkStatus()
+        val obj = JSONObject()
+            .put("model", "default")
+            .put("status", statusName(result.status))
+            .put("available", result.available)
+        if (result.error != null) obj.put("error", result.error)
+        return JSONArray().put(obj)
     }
 
     @JvmStatic
@@ -133,12 +107,21 @@ object AICoreBackend {
         temperatureF: Float,
         stage: Int,
         preference: Int
+    ): JSONObject = generate(context, prompt, maxTokens, temperatureF)
+
+    @JvmStatic
+    @Throws(Exception::class)
+    fun generate(
+        context: Context,
+        prompt: String,
+        maxTokens: Int,
+        temperatureF: Float
     ): JSONObject {
         if (!isSdkSupported()) throw IllegalStateException("Android < 12 not supported")
         storeContext(context)
 
-        val model = getModel(stage, preference)
-        val statusResult = checkModelStatus(stage, preference)
+        val model = getDefaultModel()
+        val statusResult = checkStatus()
         if (!statusResult.available) {
             throw IllegalStateException("Model not available: ${statusName(statusResult.status)}")
         }
@@ -160,19 +143,6 @@ object AICoreBackend {
     }
 
     @JvmStatic
-    @Throws(Exception::class)
-    fun generate(
-        context: Context,
-        prompt: String,
-        maxTokens: Int,
-        temperatureF: Float
-    ): String {
-        val result = generate(context, prompt, maxTokens, temperatureF,
-            ModelReleaseStage.STABLE, ModelPreference.FULL)
-        return result.optString("text", "")
-    }
-
-    @JvmStatic
     fun stream(
         context: Context,
         requestId: String,
@@ -189,7 +159,7 @@ object AICoreBackend {
         }
         storeContext(context)
 
-        val model = getModel(stage, preference)
+        val model = getDefaultModel()
         val job = streamScope.launch {
             try {
                 var totalChars = 0
@@ -224,9 +194,9 @@ object AICoreBackend {
     }
 
     private fun statusName(status: Int): String = when (status) {
-        STATUS_AVAILABLE -> "AVAILABLE"
-        STATUS_DOWNLOADABLE -> "DOWNLOADABLE"
-        STATUS_DOWNLOADING -> "DOWNLOADING"
+        2 -> "AVAILABLE"
+        1 -> "DOWNLOADABLE"
+        3 -> "DOWNLOADING"
         else -> "UNAVAILABLE"
     }
 }

@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.10"
+VERSION="0.118.0-ai.11"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
 SELF="$(basename "$0")"
