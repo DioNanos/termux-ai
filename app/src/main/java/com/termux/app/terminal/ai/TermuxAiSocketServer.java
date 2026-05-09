@@ -649,7 +649,7 @@ public final class TermuxAiSocketServer {
 
         private JSONObject aicoreInfo() throws Exception {
             boolean sdkOk = AICoreBackend.isSdkSupported();
-            boolean available = sdkOk && AICoreBackend.isAvailable();
+            boolean available = sdkOk && AICoreBackend.isAvailable(context);
             JSONObject json = new JSONObject()
                 .put("available", available)
                 .put("sdk_int", Build.VERSION.SDK_INT)
@@ -673,7 +673,7 @@ public final class TermuxAiSocketServer {
             float temperature = (float) args.optDouble("temperature", 0.2);
 
             long start = System.currentTimeMillis();
-            String text = AICoreBackend.generate(prompt, maxTokens, temperature);
+            String text = AICoreBackend.generate(context, prompt, maxTokens, temperature);
             long latencyMs = System.currentTimeMillis() - start;
 
             return new JSONObject()
