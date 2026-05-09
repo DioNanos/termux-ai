@@ -23,11 +23,13 @@ jobs:
       - name: Clone repository
         uses: actions/checkout@v4
 
-      - name: Setup java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android-sdk \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.14206865" 2>&1
 
       - name: Build APKs
         run: |
