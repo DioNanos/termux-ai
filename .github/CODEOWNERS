@@ -1,0 +1,5 @@
+# CODEOWNERS for termux-ai
+# Termux AI Classic — AI CLI workflow build on classic Termux compatibility.
+# Generic Termux changes belong upstream: https://github.com/termux
+
+* @DioNanos
