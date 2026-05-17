@@ -185,5 +185,6 @@ cleaner without committing large generated bootstrap archives.
 Termux AI Classic preserves Termux licensing and notices. See the repository
 license files for GPL, Apache, and MIT components.
 
-Thanks to the Termux project and community for the foundation this work builds
-on.
+DioNanos-specific additions are licensed under Apache-2.0 where compatible with the upstream Termux licensing. See [LICENSE-DIONANOS.md](LICENSE-DIONANOS.md).
+
+Thanks to the Termux project and community for the foundation this work builds on.
