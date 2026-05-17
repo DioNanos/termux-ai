@@ -197,3 +197,11 @@ Maintained by [DioNanos](https://github.com/DioNanos).
 - General / dev: **dev@mmmbuto.com**
 - Security disclosures: **security@mmmbuto.com**
 - Project hub: <https://mmmbuto.com>
+
+## License And Thanks
+
+Termux AI Classic preserves Termux licensing and notices. See the repository license files for GPL, Apache, and MIT components.
+
+DioNanos-specific additions are licensed under Apache-2.0 where compatible with the upstream Termux licensing. See [LICENSE-DIONANOS.md](LICENSE-DIONANOS.md).
+
+Thanks to the Termux project and community for the foundation this work builds on.
