@@ -14,6 +14,7 @@ import com.termux.shared.shell.command.environment.ShellCommandShellEnvironment;
 import com.termux.shared.termux.TermuxBootstrap;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.shell.TermuxShellUtils;
+import com.termux.shared.termux.workspace.WorkspaceManager;
 
 import java.nio.charset.Charset;
 import java.util.HashMap;
@@ -28,6 +29,9 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
     /** Environment variable for the termux {@link TermuxConstants#TERMUX_PREFIX_DIR_PATH}. */
     public static final String ENV_PREFIX = "PREFIX";
 
+    /** Application context cached at init(), used by argument-less getDefaultWorkingDirectoryPath(). */
+    private static Context sAppContext;
+
     public TermuxShellEnvironment() {
         super();
         shellCommandShellEnvironment = new TermuxShellCommandShellEnvironment();
@@ -36,6 +40,7 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
 
     /** Init {@link TermuxShellEnvironment} constants and caches. */
     public synchronized static void init(@NonNull Context currentPackageContext) {
+        sAppContext = currentPackageContext.getApplicationContext();
         TermuxAppShellEnvironment.setTermuxAppEnvironment(currentPackageContext);
     }
 
@@ -75,7 +80,7 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
         if (termuxApiAppEnvironment != null)
             environment.putAll(termuxApiAppEnvironment);
 
-        environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
+        environment.put(ENV_HOME, WorkspaceManager.getActiveHomePath(currentPackageContext));
         environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
 
         // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used
@@ -99,7 +104,8 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
     @NonNull
     @Override
     public String getDefaultWorkingDirectoryPath() {
-        return TermuxConstants.TERMUX_HOME_DIR_PATH;
+        if (sAppContext == null) return TermuxConstants.TERMUX_HOME_DIR_PATH;
+        return WorkspaceManager.getActiveHomePath(sAppContext);
     }
 
     @NonNull
