@@ -181,6 +181,19 @@ public class TermuxAppSharedPreferences extends AppSharedPreferences {
 
 
 
+    public String getActiveWorkspaceName() {
+        return SharedPreferenceUtils.getString(mSharedPreferences,
+            TERMUX_APP.KEY_ACTIVE_WORKSPACE,
+            TERMUX_APP.DEFAULT_VALUE_ACTIVE_WORKSPACE, true);
+    }
+
+    public void setActiveWorkspaceName(String name) {
+        SharedPreferenceUtils.setString(mSharedPreferences,
+            TERMUX_APP.KEY_ACTIVE_WORKSPACE, name, false);
+    }
+
+
+
     public int getLogLevel() {
         return SharedPreferenceUtils.getInt(mSharedPreferences, TERMUX_APP.KEY_LOG_LEVEL, Logger.DEFAULT_LOG_LEVEL);
     }
