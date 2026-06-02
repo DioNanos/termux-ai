@@ -119,6 +119,11 @@
             android:theme="@style/Theme.TermuxApp.DayNight.NoActionBar" />
 
         <activity
+            android:name=".app.workspace.WorkspaceListActivity"
+            android:exported="false"
+            android:label="Workspaces" />
+
+        <activity
             android:name=".shared.activities.ReportActivity"
             android:theme="@style/Theme.MarkdownViewActivity.DayNight"
             android:documentLaunchMode="intoExisting" />
