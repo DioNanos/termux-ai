@@ -72,6 +72,7 @@ package com.termux.shared.termux.settings.preferences;
  */
 
 import com.termux.shared.shell.command.ExecutionCommand;
+import com.termux.shared.termux.workspace.WorkspacePaths;
 
 /**
  * A class that defines shared constants of the SharedPreferences used by Termux app and its plugins.
@@ -179,6 +180,10 @@ public final class TermuxPreferenceConstants {
          */
         public static final String KEY_CRASH_REPORT_NOTIFICATIONS_ENABLED = "crash_report_notifications_enabled";
         public static final boolean DEFAULT_VALUE_CRASH_REPORT_NOTIFICATIONS_ENABLED = true;
+
+        /** Defines the key for the currently active workspace name. */
+        public static final String KEY_ACTIVE_WORKSPACE = "active_workspace";
+        public static final String DEFAULT_VALUE_ACTIVE_WORKSPACE = WorkspacePaths.DEFAULT_WORKSPACE;
 
     }
 

@@ -570,6 +570,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         settingsButton.setOnClickListener(v -> {
             ActivityUtils.startActivity(this, new Intent(this, SettingsActivity.class));
         });
+
+        ImageButton workspaceButton = findViewById(R.id.workspace_button);
+        workspaceButton.setOnClickListener(v -> {
+            ActivityUtils.startActivity(this, new Intent(this, com.termux.app.workspace.WorkspaceListActivity.class));
+        });
     }
 
     private void setNewSessionButtonView() {

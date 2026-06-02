@@ -57,6 +57,14 @@
                         android:background="@null"
                         android:contentDescription="@string/action_open_settings"
                         app:tint="?attr/termuxActivityDrawerImageTint" />
+                    <ImageButton
+                        android:id="@+id/workspace_button"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:src="@android:drawable/ic_menu_agenda"
+                        android:background="@null"
+                        android:contentDescription="Workspaces"
+                        app:tint="?attr/termuxActivityDrawerImageTint" />
                 </LinearLayout>
 
                 <ListView
