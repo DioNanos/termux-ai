@@ -4,6 +4,36 @@
 > It keeps the normal Termux environment and adds a small compatibility layer for
 > phone-first use with Codex, Gemini CLI, Qwen Code, and similar terminal tools.
 
+## ✨ Multi-user Workspaces
+
+The headline feature: run **multiple workspaces** on a single install — like
+multiple Linux users sharing one system.
+
+- **One shared native base.** A single `$PREFIX` (`/usr`, packages, repos) is
+  shared across all workspaces — full native speed, **no proot**, no emulation.
+- **Each workspace is its own `$HOME`.** Separate files, projects, dotfiles,
+  shell history, and per-workspace tools/versions (e.g. `nvm`, `pyenv`,
+  `pip --user` install into the workspace home — node 18 in one, node 20 in
+  another).
+- **Manage from the drawer.** A Workspaces button (next to settings) lets you
+  **create / switch / delete** workspaces. The active workspace applies to
+  newly opened sessions.
+- **`default` is your existing home** — nothing changes if you never create a
+  workspace.
+
+### How to use
+
+1. Open the drawer → tap the **Workspaces** icon (next to ⚙ settings).
+2. **New workspace** → name it (lowercase letters, digits, `-` or `_`).
+3. Tap a workspace to make it active (marked `✓`), then open a **new session**.
+4. Verify: `echo $HOME` points to the workspace; `echo $PREFIX` is unchanged
+   (shared, native).
+
+> Workspaces are an **organizational** separation for development convenience
+> (same Android UID), not a security sandbox. App config (colors, font,
+> `termux.properties`) is global, tied to the default home. Switching applies
+> to new sessions; `default` and the active workspace cannot be deleted.
+
 [![release](https://img.shields.io/github/v/release/DioNanos/termux-ai?style=flat-square)](https://github.com/DioNanos/termux-ai/releases/latest)
 [![apk](https://img.shields.io/github/downloads/DioNanos/termux-ai/latest/total?style=flat-square&label=APK%20downloads)](https://github.com/DioNanos/termux-ai/releases/latest)
 [![Android 7+](https://img.shields.io/badge/Android-7%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](#install)
@@ -31,6 +61,7 @@ then uninstall Termux and its plugins before installing this APK.
 
 What this build does:
 
+- **multi-user workspaces**: multiple isolated `$HOME`s over one shared native base (see above)
 - keeps classic Termux package and proot compatibility
 - improves Android keyboard microphone input in the terminal
 - adds a toolbar text input path for quick command submission
