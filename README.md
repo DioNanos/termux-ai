@@ -199,5 +199,3 @@ Maintained by [DioNanos](https://github.com/DioNanos).
 - General / dev: **dev@mmmbuto.com**
 - Security disclosures: **security@mmmbuto.com**
 - Project hub: <https://mmmbuto.com>
-
-Thanks to the Termux project and community for the foundation this work builds on.
