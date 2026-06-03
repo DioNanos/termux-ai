@@ -23,6 +23,7 @@ import com.termux.shared.termux.interact.TextInputDialogUtils;
 import com.termux.app.TermuxActivity;
 import com.termux.shared.termux.terminal.TermuxTerminalSessionClientBase;
 import com.termux.shared.termux.TermuxConstants;
+import com.termux.shared.termux.workspace.WorkspaceManager;
 import com.termux.app.TermuxService;
 import com.termux.shared.termux.settings.properties.TermuxPropertyConstants;
 import com.termux.shared.termux.terminal.io.BellHandler;
@@ -369,14 +370,12 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
             new AlertDialog.Builder(mActivity).setTitle(R.string.title_max_terminals_reached).setMessage(R.string.msg_max_terminals_reached)
                 .setPositiveButton(android.R.string.ok, null).show();
         } else {
-            TerminalSession currentSession = mActivity.getCurrentSession();
-
-            String workingDirectory;
-            if (currentSession == null) {
-                workingDirectory = mActivity.getProperties().getDefaultWorkingDirectory();
-            } else {
-                workingDirectory = currentSession.getCwd();
-            }
+            // New sessions always start in the active workspace's HOME so that the
+            // working directory matches $HOME (which TermuxShellEnvironment also sets
+            // from the active workspace). Without this, a new session would inherit the
+            // previous session's cwd or the default working directory, leaving cwd on the
+            // default home even after switching workspace.
+            String workingDirectory = WorkspaceManager.getActiveHomePath(mActivity);
 
             TermuxSession newTermuxSession = service.createTermuxSession(null, null, null, workingDirectory, isFailSafe, sessionName);
             if (newTermuxSession == null) return;
