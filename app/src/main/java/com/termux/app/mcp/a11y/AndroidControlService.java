@@ -141,6 +141,30 @@ public final class AndroidControlService extends AccessibilityService {
         return ok ? okJson() : errJson("ACTION_UNSUPPORTED");
     }
 
+    public synchronized String launchAppJson(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return errJson("PACKAGE_NOT_FOUND");
+        try {
+            android.content.Intent i = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (i == null) return errJson("PACKAGE_NOT_FOUND");
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return okJson();
+        } catch (Exception e) {
+            return errJson("LAUNCH_FAILED");
+        }
+    }
+
+    public synchronized String wakeJson() {
+        try {
+            android.content.Intent i = new android.content.Intent(this, WakeActivity.class);
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return okJson();
+        } catch (Exception e) {
+            return errJson("WAKE_FAILED");
+        }
+    }
+
     // ---- helpers ----
 
     private AccessibilityNodeInfo resolve(String ref) {

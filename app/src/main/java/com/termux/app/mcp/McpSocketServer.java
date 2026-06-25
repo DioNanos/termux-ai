@@ -143,6 +143,20 @@ public final class McpSocketServer {
                 else out = svc.typeJson(args.optString("node_ref", ""), args.optString("text", ""));
                 break;
             }
+            case "launch_app": {
+                AndroidControlService svc = AndroidControlService.INSTANCE;
+                if (svc == null) out = errJson("SERVICE_OFF");
+                else if (!actEnabled()) out = errJson("POLICY_DENIED");
+                else out = svc.launchAppJson(args.optString("package", ""));
+                break;
+            }
+            case "wake": {
+                AndroidControlService svc = AndroidControlService.INSTANCE;
+                if (svc == null) out = errJson("SERVICE_OFF");
+                else if (!actEnabled()) out = errJson("POLICY_DENIED");
+                else out = svc.wakeJson();
+                break;
+            }
             default:
                 out = errJson("UNKNOWN_TOOL");
         }

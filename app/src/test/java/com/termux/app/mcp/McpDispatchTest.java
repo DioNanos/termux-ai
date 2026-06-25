@@ -46,11 +46,11 @@ public class McpDispatchTest {
     }
 
     @Test
-    public void toolsListReturnsFourTools() {
+    public void toolsListReturnsAllTools() {
         McpDispatch d = dispatcher(new String[1]);
         d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"auth\":\"secret\"}}");
         JSONObject r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"));
-        assertEquals(4, r.getJSONObject("result").getJSONArray("tools").length());
+        assertEquals(6, r.getJSONObject("result").getJSONArray("tools").length());
     }
 
     @Test

@@ -52,6 +52,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- android-control: see/launch other apps (sideload; Play would restrict this) -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:name=".app.TermuxApplication"
@@ -268,6 +270,13 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/android_control_a11y_config" />
         </service>
+
+        <!-- android-control: transparent helper to wake screen / dismiss non-secure keyguard -->
+        <activity
+            android:name="com.termux.app.mcp.a11y.WakeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     </application>
 

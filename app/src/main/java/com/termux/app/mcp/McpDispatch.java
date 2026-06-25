@@ -103,6 +103,12 @@ public final class McpDispatch {
             tools.put(tool("type",
                 "Set text on the editable element identified by node_ref.",
                 schemaTypeArgs()));
+            tools.put(tool("wake",
+                "Turn the screen on and dismiss a non-secure keyguard (best-effort).",
+                new JSONObject().put("type", "object").put("properties", new JSONObject())));
+            tools.put(tool("launch_app",
+                "Bring an app to the foreground by package name (resolves its launcher activity).",
+                schemaOneString("package")));
             JSONObject result = new JSONObject().put("tools", tools);
             return ok(id, result);
         } catch (Exception e) {
