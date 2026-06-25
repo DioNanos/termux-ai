@@ -67,6 +67,13 @@ public class TermuxApplication extends Application {
             // Setup termux-ai socket server for Android-native AI CLI helpers.
             TermuxAiSocketServer.setup(context);
             TermuxAiCliInstaller.installIfPossible(context);
+
+            // Setup android-control MCP host (in-APK). Must never crash the app.
+            try {
+                com.termux.app.mcp.McpSocketServer.setup(context);
+            } catch (Throwable t) {
+                Logger.logStackTraceWithMessage(LOG_TAG, "android-control MCP setup failed", t);
+            }
         } else {
             Logger.logErrorExtended(LOG_TAG, "Termux files directory is not accessible\n" + error);
         }
