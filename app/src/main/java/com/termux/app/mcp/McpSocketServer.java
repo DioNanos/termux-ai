@@ -164,8 +164,10 @@ public final class McpSocketServer {
         @Override
         public void onClientAccepted(@NonNull LocalSocketManager manager,
                                      @NonNull LocalClientSocket clientSocket) {
-            McpDispatch dispatch = new McpDispatch(McpSocketServer::runTool,
-                t -> token != null && token.equals(t));
+            // Socket is the boundary: filesystem 0600 in the app sandbox → only the
+            // com.termux uid can connect. Token file is reserved for the future
+            // HTTP/SSE opt-in transport; on this private socket we trust the peer.
+            McpDispatch dispatch = new McpDispatch(McpSocketServer::runTool, t -> true);
             try (BufferedReader reader = new BufferedReader(clientSocket.getInputStreamReader())) {
                 OutputStream out = clientSocket.getOutputStream();
                 String line;
