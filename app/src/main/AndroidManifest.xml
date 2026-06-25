@@ -256,6 +256,19 @@
             android:name="com.sec.android.support.multiwindow"
             android:value="true" />
 
+        <!-- android-control: AccessibilityService backing the in-APK MCP module -->
+        <service
+            android:name="com.termux.app.mcp.a11y.AndroidControlService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/android_control_a11y_config" />
+        </service>
+
     </application>
 
 </manifest>
