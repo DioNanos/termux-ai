@@ -52,8 +52,24 @@ public final class TermuxAiCliInstaller {
 
         installManagedHelpers(context);
         installLibexecApi(context);
+        installNamedAsset(context, "termux-ai-mcp",
+            new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR, "termux-ai-mcp"));
         writeManifest();
         deleteOldHelpers();
+    }
+
+    private static void installNamedAsset(Context context, String assetName, File file) {
+        try (InputStream in = context.getAssets().open(assetName);
+             FileOutputStream out = new FileOutputStream(file)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            file.setExecutable(true, false);
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to install " + assetName, e);
+        }
     }
 
     private static void installManagedHelpers(Context context) {

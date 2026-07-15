@@ -1,0 +1,64 @@
+name: Blocking CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-candidate/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blocking-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TERMUX_PACKAGE_VARIANT: apt-android-7
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Verify Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -d "$ANDROID_HOME/ndk/29.0.14206865"
+
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon --stacktrace
+
+      - name: Build debug APKs
+        env:
+          TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS: '1'
+          TERMUX_APK_VERSION_TAG: ci-${{ github.sha }}
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify expected APK set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print | sort)
+          test "${#apks[@]}" -eq 5
+          for abi in arm64-v8a armeabi-v7a x86_64 x86 universal; do
+            count="$(printf '%s\n' "${apks[@]}" | grep -c -- "_${abi}\.apk$")"
+            test "$count" -eq 1
+          done

@@ -46,6 +46,16 @@ Download the latest APK from:
 
 - [Latest GitHub release](https://github.com/DioNanos/termux-ai/releases/latest)
 
+Choose the APK that matches the device CPU, or use the larger universal APK:
+
+| APK | Typical devices |
+|---|---|
+| `arm64-v8a` | Most current Android phones and tablets, including Pixel and Galaxy devices |
+| `armeabi-v7a` | Older 32-bit ARM devices |
+| `x86_64` | 64-bit Intel devices and emulators |
+| `x86` | Legacy 32-bit Intel devices and emulators |
+| `universal` | One APK containing all four architectures |
+
 Requirements:
 
 - Android 7+ / API 24+
@@ -67,6 +77,7 @@ What this build does:
 - adds a toolbar text input path for quick command submission
 - installs a verified `termux-ai` shell command for core Android context
 - internalizes the first wave of Termux:API-compatible helpers for AI CLI use
+- runs boot scripts directly from the active workspace without requiring the separate Termux:Boot app
 - includes `mandoc` in the first bootstrap to avoid manpage database warnings
 
 What this build does not do:
@@ -169,15 +180,41 @@ Wave 1 methods. Compatibility is intentionally scoped to AI-safe helpers first;
 SMS, calls, call logs, contacts, continuous location, USB, NFC, and notification
 listener access are not part of this public release.
 
+## Boot Scripts Without A Companion App
+
+Termux AI Classic runs executable files from either of these directories after
+Android sends `BOOT_COMPLETED`:
+
+```text
+~/.config/termux/boot
+~/.termux/boot
+```
+
+Scripts are launched in filename order inside the active workspace. Open Termux AI once
+after a fresh installation, create a script, and make it executable. For
+example:
+
+```sh
+mkdir -p ~/.config/termux/boot
+printf '%s\n' '#!/data/data/com.termux/files/usr/bin/sh' \
+  'date -Ins >> "$HOME/boot-proof.log"' \
+  > ~/.config/termux/boot/10-proof
+chmod 700 ~/.config/termux/boot/10-proof
+```
+
+Android does not deliver boot broadcasts to an app that has been force-stopped
+until the app is opened again. Credential-protected Termux files are available
+after the user unlocks the device.
+
 ## Releases
 
-- Current GitHub release: [v0.118.0-ai.11](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.11)
+- Current GitHub release: [v0.118.0-ai.17](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.17)
 - Current line: `0.118.0-ai.x`
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
 
-`v0.118.0-ai.11` adds on-device AI inference via Google AICore (ML Kit GenAI
-Prompt API) with ANR-safe socket transport.
+`v0.118.0-ai.17` integrates boot-script execution directly into Termux AI
+Classic and publishes signed per-architecture APKs alongside a universal APK.
 
 ## Build
 

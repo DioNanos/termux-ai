@@ -239,4 +239,7 @@
     <!-- Donate Preference -->
     <string name="donate_preference_title">Donate</string>
 
+    <!-- android-control accessibility module -->
+    <string name="android_control_a11y_description">Lets an AI agent observe and control the screen via the in-app MCP server (android-control). Enable only if you use this feature.</string>
+
 </resources>

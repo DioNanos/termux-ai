@@ -1,0 +1,140 @@
+name: Release Candidate APKs
+run-name: Release candidate ${{ inputs.version || github.ref_name }}
+
+on:
+  push:
+    branches:
+      - 'release-candidate/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version name from app/build.gradle, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}-${{ inputs.version || 'source' }}
+  cancel-in-progress: false
+
+jobs:
+  unsigned-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TERMUX_PACKAGE_VARIANT: apt-android-7
+      TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS: '1'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Verify Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -d "$ANDROID_HOME/ndk/29.0.14206865"
+
+      - name: Resolve and verify version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_version="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]+"/ { print $2; exit }' app/build.gradle)"
+          test -n "$source_version"
+          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$source_version" ]]; then
+            echo "Requested version does not match app/build.gradle" >&2
+            exit 1
+          fi
+          echo "TERMUX_APP_VERSION_NAME=$source_version" >> "$GITHUB_ENV"
+          echo "TERMUX_APK_VERSION_TAG=v${source_version}-unsigned" >> "$GITHUB_ENV"
+          echo "version=$source_version" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon --stacktrace
+
+      - name: Build unsigned release APKs
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Stage and validate release candidate
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir='app/build/outputs/apk/release'
+          staging_dir="$RUNNER_TEMP/termux-ai-release-candidate"
+          source_version_code="$(awk '/^[[:space:]]*versionCode[[:space:]]+/ { print $2; exit }' app/build.gradle)"
+          test -n "$source_version_code"
+          mkdir -p "$staging_dir"
+
+          mapfile -t apks < <(find "$output_dir" -maxdepth 1 -type f -name '*.apk' -print | sort)
+          test "${#apks[@]}" -eq 5
+
+          for abi in arm64-v8a armeabi-v7a x86_64 x86 universal; do
+            mapfile -t matches < <(printf '%s\n' "${apks[@]}" | grep -- "_${abi}\.apk$")
+            test "${#matches[@]}" -eq 1
+            destination="$staging_dir/termux-ai-v${TERMUX_APP_VERSION_NAME}-unsigned-${abi}.apk"
+            cp -- "${matches[0]}" "$destination"
+
+            unzip -tq "$destination" >/dev/null
+            badging="$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$destination")"
+            grep -Fq "name='com.termux'" <<<"$badging"
+            grep -Fq "versionCode='${source_version_code}'" <<<"$badging"
+            grep -Fq "versionName='${TERMUX_APP_VERSION_NAME}'" <<<"$badging"
+
+            if "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$destination" >/dev/null 2>&1; then
+              echo "Unexpected signature on $destination" >&2
+              exit 1
+            fi
+          done
+
+          (
+            cd "$staging_dir"
+            sha256sum *.apk > SHA256SUMS
+          )
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg version "$TERMUX_APP_VERSION_NAME" \
+            --arg version_code "$source_version_code" \
+            --arg package_variant "$TERMUX_PACKAGE_VARIANT" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              repository: $repository,
+              commit: $commit,
+              ref: $ref,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              version: $version,
+              version_code: $version_code,
+              package_variant: $package_variant,
+              signed: false,
+              generated_at: $generated_at
+            }' > "$staging_dir/release-manifest.json"
+
+          echo "directory=$staging_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload unsigned release candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: termux-ai-${{ steps.version.outputs.version }}-unsigned-release-candidate
+          path: ${{ steps.stage.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 7
