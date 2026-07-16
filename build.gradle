@@ -3,6 +3,12 @@ buildscript {
         kotlinVersion = "2.1.0"
         bouncyCastleVersion = "1.80.2"
         nettyVersion = "4.1.135.Final"
+        protobufVersion = "3.25.5"
+        protobufModules = [
+            "protobuf-java",
+            "protobuf-java-util",
+            "protobuf-kotlin",
+        ]
         nettyModules = [
             "netty-buffer",
             "netty-codec",
@@ -35,6 +41,10 @@ buildscript {
                     details.useVersion nettyVersion
                     details.because "Keep the Android build toolchain on a patched, coherent Netty family"
                 }
+                if (details.requested.group == "com.google.protobuf" && protobufModules.contains(details.requested.name)) {
+                    details.useVersion protobufVersion
+                    details.because "Keep the Android build toolchain on a patched, coherent protobuf family"
+                }
             }
         }
     }
@@ -51,6 +61,10 @@ allprojects {
             if (details.requested.group == "io.netty" && rootProject.nettyModules.contains(details.requested.name)) {
                 details.useVersion rootProject.nettyVersion
                 details.because "Keep Android test tooling on a patched, coherent Netty family"
+            }
+            if (details.requested.group == "com.google.protobuf" && rootProject.protobufModules.contains(details.requested.name)) {
+                details.useVersion rootProject.protobufVersion
+                details.because "Keep Android test tooling on a patched, coherent protobuf family"
             }
         }
     }
