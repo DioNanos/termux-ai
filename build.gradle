@@ -1,6 +1,7 @@
 buildscript {
     ext {
         kotlinVersion = "2.1.0"
+        bouncyCastleVersion = "1.80.2"
     }
     repositories {
         mavenCentral()
@@ -9,6 +10,13 @@ buildscript {
     dependencies {
         classpath "com.android.tools.build:gradle:8.13.2"
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}"
+    }
+    configurations.classpath {
+        resolutionStrategy {
+            force "org.bouncycastle:bcprov-jdk18on:${bouncyCastleVersion}"
+            force "org.bouncycastle:bcpkix-jdk18on:${bouncyCastleVersion}"
+            force "org.bouncycastle:bcutil-jdk18on:${bouncyCastleVersion}"
+        }
     }
 }
 
