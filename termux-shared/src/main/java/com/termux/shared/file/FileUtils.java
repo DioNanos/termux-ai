@@ -1143,7 +1143,7 @@ public class FileUtils {
                     return error;
 
                 if (srcFileType == FileType.DIRECTORY) {
-                    // Will give runtime exceptions on android < 8 due to missing classes like java.nio.file.Path if org.apache.commons.io version > 2.5
+                    // NIO core library desugaring supplies Commons IO's java.nio.file APIs on Android < 8.
                     org.apache.commons.io.FileUtils.copyDirectory(srcFile, destFile, true);
                 } else if (srcFileType == FileType.SYMLINK) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1159,7 +1159,7 @@ public class FileUtils {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         java.nio.file.Files.copy(srcFile.toPath(), destFile.toPath(), LinkOption.NOFOLLOW_LINKS, StandardCopyOption.REPLACE_EXISTING);
                     } else {
-                        // Will give runtime exceptions on android < 8 due to missing classes like java.nio.file.Path if org.apache.commons.io version > 2.5
+                        // NIO core library desugaring supplies Commons IO's java.nio.file APIs on Android < 8.
                         org.apache.commons.io.FileUtils.copyFile(srcFile, destFile, true);
                     }
                 }
@@ -1340,10 +1340,10 @@ public class FileUtils {
             } else {
                 if (fileType == FileType.DIRECTORY) {
                     // deleteDirectory() instead of forceDelete() gets the files list first instead of walking directory tree, so seems safer
-                    // Will give runtime exceptions on android < 8 due to missing classes like java.nio.file.Path if org.apache.commons.io version > 2.5
+                    // NIO core library desugaring supplies Commons IO's java.nio.file APIs on Android < 8.
                     org.apache.commons.io.FileUtils.deleteDirectory(file);
                 } else {
-                    // Will give runtime exceptions on android < 8 due to missing classes like java.nio.file.Path if org.apache.commons.io version > 2.5
+                    // NIO core library desugaring supplies Commons IO's java.nio.file APIs on Android < 8.
                     org.apache.commons.io.FileUtils.forceDelete(file);
                 }
             }
@@ -1412,7 +1412,7 @@ public class FileUtils {
                     //noinspection UnstableApiUsage
                     com.google.common.io.MoreFiles.deleteDirectoryContents(file.toPath(), RecursiveDeleteOption.ALLOW_INSECURE);
                 } else {
-                    // Will give runtime exceptions on android < 8 due to missing classes like java.nio.file.Path if org.apache.commons.io version > 2.5
+                    // NIO core library desugaring supplies Commons IO's java.nio.file APIs on Android < 8.
                     org.apache.commons.io.FileUtils.cleanDirectory(new File(filePath));
                 }
             }

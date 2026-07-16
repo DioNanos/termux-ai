@@ -21,10 +21,9 @@ android {
 
         implementation "androidx.window:window:1.1.0"
 
-        // Do not increment version higher than 2.5 or there
-        // will be runtime exceptions on android < 8
-        // due to missing classes like java.nio.file.Path.
-        implementation "commons-io:commons-io:2.5"
+        // Commons IO 2.14+ uses java.nio.file APIs. The NIO desugared JDK
+        // dependency below supplies those APIs on Android 7 and older.
+        implementation "commons-io:commons-io:2.14.0"
 
         implementation project(":terminal-view")
 
@@ -76,7 +75,9 @@ android {
 dependencies {
     testImplementation "junit:junit:4.13.2"
     androidTestImplementation "androidx.test.ext:junit:1.1.5"
-    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:1.1.5"
+    androidTestImplementation "androidx.test:runner:1.5.2"
+    androidTestImplementation "com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava"
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs_nio:2.1.5"
 }
 
 task sourceJar(type: Jar) {
