@@ -2,6 +2,20 @@ buildscript {
     ext {
         kotlinVersion = "2.1.0"
         bouncyCastleVersion = "1.80.2"
+        nettyVersion = "4.1.135.Final"
+        nettyModules = [
+            "netty-buffer",
+            "netty-codec",
+            "netty-codec-http",
+            "netty-codec-http2",
+            "netty-codec-socks",
+            "netty-common",
+            "netty-handler",
+            "netty-handler-proxy",
+            "netty-resolver",
+            "netty-transport",
+            "netty-transport-native-unix-common",
+        ]
     }
     repositories {
         mavenCentral()
@@ -16,6 +30,12 @@ buildscript {
             force "org.bouncycastle:bcprov-jdk18on:${bouncyCastleVersion}"
             force "org.bouncycastle:bcpkix-jdk18on:${bouncyCastleVersion}"
             force "org.bouncycastle:bcutil-jdk18on:${bouncyCastleVersion}"
+            eachDependency { details ->
+                if (details.requested.group == "io.netty" && nettyModules.contains(details.requested.name)) {
+                    details.useVersion nettyVersion
+                    details.because "Keep the Android build toolchain on a patched, coherent Netty family"
+                }
+            }
         }
     }
 }
@@ -25,5 +45,13 @@ allprojects {
         google()
         mavenCentral()
         maven { url "https://jitpack.io" }
+    }
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == "io.netty" && rootProject.nettyModules.contains(details.requested.name)) {
+                details.useVersion rootProject.nettyVersion
+                details.because "Keep Android test tooling on a patched, coherent Netty family"
+            }
+        }
     }
 }
