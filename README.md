@@ -208,13 +208,15 @@ after the user unlocks the device.
 
 ## Releases
 
-- Current GitHub release: [v0.118.0-ai.17](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.17)
+- Current GitHub release: [v0.118.0-ai.18](https://github.com/DioNanos/termux-ai/releases/tag/v0.118.0-ai.18)
 - Current line: `0.118.0-ai.x`
 - Upstream base: Termux app classic line
 - First public build: `0.118.0-ai.5`
 
-`v0.118.0-ai.17` integrates boot-script execution directly into Termux AI
-Classic and publishes signed per-architecture APKs alongside a universal APK.
+`v0.118.0-ai.18` upgrades Commons IO to 2.14.0 with NIO core-library
+desugaring for Android 7 compatibility, retains the dependency hardening from
+the previous line, and publishes signed per-architecture APKs alongside a
+universal APK.
 
 ## Build
 
