@@ -262,6 +262,11 @@ Usage:
   termux-ai aicore generate [--max-tokens N] [--temperature F] [--top-k N]
                             [--stage stable|preview] [--preference full|fast]
                             [--json|--text] PROMPT
+  termux-ai litert info
+  termux-ai litert models
+  termux-ai litert generate --backend cpu|gpu|npu --model ID [--max-tokens N]
+                            [--temperature F] [--top-k N] [--request-id ID]
+                            [--json|--text] PROMPT
 
 Output is compact JSON by default.
 EOF
@@ -384,6 +389,8 @@ describe_app_error() {
   [ -z "${J[error_name]:-}" ] || extra="${J[error_name]}"
   if [ -n "${J[error_code]:-}" ]; then extra="${extra:+$extra, }code ${J[error_code]}"; fi
   if [ -n "${J[retry_delay_ms]:-}" ]; then extra="${extra:+$extra, }retry after ${J[retry_delay_ms]} ms"; fi
+  if [ -n "${J[backend_requested]:-}" ]; then extra="${extra:+$extra, }backend ${J[backend_requested]}"; fi
+  if [ -n "${J[phase]:-}" ]; then extra="${extra:+$extra, }phase ${J[phase]}"; fi
   if [ -n "$extra" ]; then message="$message ($extra)"; fi
   printf '%s' "$message"
 }
@@ -803,6 +810,83 @@ main() {
           ;;
         *)
           fail_json "Usage: termux-ai aicore info|models|download|generate" "$EX_USAGE"
+          ;;
+      esac
+      ;;
+    litert)
+      local sub="${1:-info}"
+      shift || true
+      case "$sub" in
+        info|models)
+          [ "$#" -eq 0 ] || emit_error text "litert $sub takes no options" "$EX_USAGE"
+          # Read-only, but there is no broadcast path for the local-model engine: the socket is the only way.
+          local status
+          set +e
+          socket_request "{\"cmd\":\"litert.$sub\",\"args\":{}}"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error json "$SOCKET_ERROR" "$status"
+          handle_response json "$sub" "$SOCKET_RESPONSE"
+          ;;
+        generate)
+          local prompt="" max_tokens="" temperature="" top_k="" backend="" model="" request_id="" mode="text"
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --backend) aicore_need_value "$@"; backend="$2"; shift 2 ;;
+              --model) aicore_need_value "$@"; model="$2"; shift 2 ;;
+              --request-id) aicore_need_value "$@"; request_id="$2"; shift 2 ;;
+              --max-tokens) aicore_need_value "$@"; max_tokens="$2"; shift 2 ;;
+              --temperature) aicore_need_value "$@"; temperature="$2"; shift 2 ;;
+              --top-k) aicore_need_value "$@"; top_k="$2"; shift 2 ;;
+              --json) mode="json"; shift ;;
+              --text) mode="text"; shift ;;
+              --stage|--preference) emit_error "$mode" "$1 is an AICore option; litert takes --backend cpu|gpu|npu" "$EX_USAGE" ;;
+              --) shift; prompt="$*"; break ;;
+              -) prompt="$(cat -)"; shift ;;
+              *) prompt="$*"; break ;;
+            esac
+          done
+          # The backend is always explicit: nothing is guessed from the model name, and nothing falls back.
+          case "$backend" in
+            cpu|gpu|npu) ;;
+            '') emit_error "$mode" "--backend is required (cpu, gpu or npu)" "$EX_USAGE" ;;
+            *) emit_error "$mode" "--backend must be cpu, gpu or npu (got: $backend)" "$EX_USAGE" ;;
+          esac
+          [ -n "$model" ] || emit_error "$mode" "--model is required (see: termux-ai litert models)" "$EX_USAGE"
+          [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || emit_error "$mode" "--model must be a model id such as qwen3-0.6b" "$EX_USAGE"
+          if [ -n "$request_id" ]; then
+            [[ "$request_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || emit_error "$mode" "--request-id must be 1 to 64 characters of A-Z a-z 0-9 . _ -" "$EX_USAGE"
+          else
+            request_id="r$(date +%s)-$$-$RANDOM"
+          fi
+          if [ -n "$max_tokens" ]; then
+            [[ "$max_tokens" =~ ^[1-9][0-9]*$ ]] || emit_error "$mode" "--max-tokens must be a positive integer" "$EX_USAGE"
+          fi
+          if [ -n "$temperature" ]; then
+            [[ "$temperature" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || emit_error "$mode" "--temperature must be a number between 0 and 1, such as 0.2" "$EX_USAGE"
+          fi
+          if [ -n "$top_k" ]; then
+            [[ "$top_k" =~ ^[1-9][0-9]*$ ]] || emit_error "$mode" "--top-k must be a positive integer" "$EX_USAGE"
+          fi
+          [ -n "$prompt" ] || prompt="$(cat -)"
+          [ -n "$prompt" ] || emit_error "$mode" "Usage: termux-ai litert generate --backend cpu|gpu|npu --model ID [options] PROMPT" "$EX_USAGE"
+
+          local payload status
+          payload="{\"cmd\":\"litert.generate\",\"args\":{\"request_id\":$(json_string "$request_id"),\"model\":$(json_string "$model"),\"backend\":$(json_string "$backend"),\"prompt\":$(json_string "$prompt")"
+          [ -z "$max_tokens" ] || payload+=",\"max_tokens\":$max_tokens"
+          [ -z "$temperature" ] || payload+=",\"temperature\":$temperature"
+          [ -z "$top_k" ] || payload+=",\"top_k\":$top_k"
+          payload+="}}"
+          # Once the request is on the wire it is never sent again: no second attempt, no other backend.
+          set +e
+          socket_request "$payload"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error "$mode" "$SOCKET_ERROR" "$status"
+          handle_response "$mode" text "$SOCKET_RESPONSE"
+          ;;
+        *)
+          fail_json "Usage: termux-ai litert info|models|generate" "$EX_USAGE"
           ;;
       esac
       ;;

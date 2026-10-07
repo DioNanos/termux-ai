@@ -15,6 +15,7 @@ import com.termux.shared.termux.settings.properties.TermuxAppSharedProperties;
 import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment;
 import com.termux.shared.termux.shell.am.TermuxAmSocketServer;
 import com.termux.app.terminal.ai.TermuxAiSocketServer;
+import com.termux.app.terminal.ai.ProcessGuard;
 import com.termux.app.terminal.ai.TermuxAiCliInstaller;
 import com.termux.shared.termux.shell.TermuxShellManager;
 import com.termux.shared.termux.theme.TermuxThemeUtils;
@@ -25,6 +26,10 @@ public class TermuxApplication extends Application {
 
     public void onCreate() {
         super.onCreate();
+
+        // The LiteRT-LM engine runs in its own process (":litert"). That process starts this Application too, and
+        // must not open the termux-ai socket, the MCP host or the terminal state: it only hosts the engine.
+        if (ProcessGuard.isLitertProcess(ProcessGuard.currentProcessName(), getPackageName())) return;
 
         Context context = getApplicationContext();
 

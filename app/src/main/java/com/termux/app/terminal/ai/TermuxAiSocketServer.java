@@ -43,6 +43,10 @@ import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import com.termux.app.terminal.ai.litert.LitertApp;
+import com.termux.app.terminal.ai.litert.LitertCommands;
+import com.termux.app.terminal.ai.litert.LitertFailure;
+
 public final class TermuxAiSocketServer {
 
     public static final String LOG_TAG = "TermuxAiSocketServer";
@@ -196,11 +200,17 @@ public final class TermuxAiSocketServer {
                     case "aicore.generate":
                     case "aicore.download":
                         return ok(aicoreCommands().handle(cmd, args));
+                    case "litert.info":
+                    case "litert.models":
+                    case "litert.generate":
+                        return ok(new LitertCommands(LitertApp.engine(context)).handle(cmd, args));
                     default:
                         return error("Unknown command: " + cmd);
                 }
             } catch (AiCoreFailure f) {
                 return error(f);
+            } catch (LitertFailure f) {
+                return f.toJson();
             } catch (IllegalArgumentException e) {
                 return error("Invalid request: " + e.getMessage());
             } catch (Exception e) {
@@ -247,7 +257,10 @@ public final class TermuxAiSocketServer {
                     .put("aicore.info")
                     .put("aicore.models")
                     .put("aicore.generate")
-                    .put("aicore.download"));
+                    .put("aicore.download")
+                    .put("litert.info")
+                    .put("litert.models")
+                    .put("litert.generate"));
         }
 
         private JSONObject sysInfo() throws Exception {

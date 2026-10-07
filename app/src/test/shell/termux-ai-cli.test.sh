@@ -335,5 +335,68 @@ start_stub reply "$WORK/resp"
 run_cli aicore info
 [ "$RC" -ne 0 ] && grep -q '"ok":false' "$WORK/out"; check "info ok:false gives rc != 0 and prints the JSON" $?
 
+
+# ------------------------------------------------------------------- litert verbs
+lrequests() { grep -c '"cmd":"litert.generate"' "$WORK/requests.log"; }
+
+start_stub echo
+run_cli litert generate --backend npu --model qwen3-0.6b --request-id t1 --max-tokens 64 --temperature 0.3 --top-k 20 hello world
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+args = req["args"]
+assert req["cmd"] == "litert.generate", req
+assert args == {"request_id": "t1", "model": "qwen3-0.6b", "backend": "npu", "prompt": "hello world",
+                "max_tokens": 64, "temperature": 0.3, "top_k": 20}, args
+PY
+check "litert generate sends the backend, model, request id and every flag" $?
+[ "$RC" -eq 0 ] && [ "$(cat "$WORK/out")" = "hello world" ] && [ "$(broadcasts)" -eq 0 ]
+check "litert generate prints the answer, rc 0, no broadcast" $?
+
+: > "$WORK/requests.log"
+run_cli litert generate --backend cpu --model m hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, re, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["backend"] == "cpu" and args["model"] == "m", args
+assert re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args["request_id"]), args["request_id"]
+assert "max_tokens" not in args and "temperature" not in args and "top_k" not in args, args
+PY
+check "without flags the request has a generated request id and no parameters" $?
+
+for badflags in "--model m" "--backend CPU --model m" "--backend tpu --model m" "--backend --model m" "--backend cpu" "--backend cpu --model ../x" "--backend cpu --model a/b" "--backend cpu --model .hidden" "--backend cpu --model m --request-id a/b" "--backend cpu --model m --stage stable" "--backend cpu --model m --preference fast" "--backend cpu --model m --max-tokens 0" "--backend cpu --model m --temperature 1.5" "--backend cpu --model m --top-k 0"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert generate $badflags hello
+  check "litert generate '$badflags' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && [ ! -s "$WORK/out" ] && echo 0 || echo 1)" "rc=$RC requests=$(lrequests)"
+done
+
+: > "$WORK/requests.log"
+run_cli litert info
+grep -q '"cmd":"litert.info"' "$WORK/requests.log" && [ "$(broadcasts)" -eq 0 ]
+check "litert info goes through the socket" $?
+run_cli litert models extra
+check "litert models takes no options" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
+run_cli litert download
+check "litert has no download" "$([ "$RC" -ne 0 ] && echo 0 || echo 1)" "rc=$RC"
+
+printf '%s\n' '{"ok":false,"error":"dispatch rejected the model","error_name":"BACKEND_INIT_FAILED","error_code":1009,"phase":"init","backend_requested":"npu"}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli litert generate --backend npu --model m hello
+[ "$RC" -eq 1 ] && [ ! -s "$WORK/out" ] && grep -q "dispatch rejected the model" "$WORK/err" && grep -q "BACKEND_INIT_FAILED" "$WORK/err" && grep -q "backend npu" "$WORK/err" && grep -q "phase init" "$WORK/err"
+check "a litert failure is rc 1 and names the code, the backend and the phase" $?
+[ "$(lrequests)" -eq 1 ] && [ "$(broadcasts)" -eq 0 ]
+check "a litert failure is not retried on another backend or by broadcast" $?
+
+start_stub drop
+run_cli litert generate --backend gpu --model m hello
+check "litert: broken transport after send is rc 4, one request, zero broadcasts" "$([ "$RC" -eq 4 ] && [ "$(lrequests)" -eq 1 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC requests=$(lrequests) broadcasts=$(broadcasts)"
+
+stop_stub; rm -f "$WORK/ai.sock"; : > "$WORK/broadcast.log"
+run_cli litert generate --backend cpu --model m hello
+check "litert: socket absent, generate is rc 3 and does not broadcast" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+run_cli litert info
+check "litert: socket absent, info is rc 3 too (there is no broadcast path)" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC broadcasts=$(broadcasts)"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -14,7 +14,9 @@
 
     <!-- ML Kit GenAI Prompt API declares minSdk 26 (genai-prompt + transitive genai-common).
          termux-ai keeps minSdk 21 (classic Termux) and runtime-guards every AICore callsite. -->
-    <uses-sdk tools:overrideLibrary="com.google.mlkit.genai.prompt, com.google.mlkit.genai.common, com.google.android.gms.common" />
+    <!-- LiteRT-LM (litertlm-android 0.18.0) and its Google Tensor NPU runtime declare minSdk 24. Same rule: the
+         engine only runs in the :litert process, behind a runtime guard (API 24, NPU API 31, arm64-v8a). -->
+    <uses-sdk tools:overrideLibrary="com.google.mlkit.genai.prompt, com.google.mlkit.genai.common, com.google.android.gms.common, com.google.ai.edge.litertlm, com.google.ai.edge.litert.npu.google_tensor" />
 
     <!-- Bind permission for the AICore system service; query the system AICore package. -->
     <uses-permission android:name="com.google.android.apps.aicore.service.BIND_SERVICE" />
@@ -224,6 +226,13 @@
         <service
             android:name=".app.TermuxService"
             android:exported="false" />
+
+        <!-- The LiteRT-LM engine. Own process so a native fault ends it and not the terminal; not exported, so
+             only this app can bind it. -->
+        <service
+            android:name=".app.terminal.ai.litert.LitertService"
+            android:exported="false"
+            android:process=":litert" />
 
         <service
             android:name=".app.RunCommandService"

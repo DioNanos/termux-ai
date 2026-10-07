@@ -40,7 +40,14 @@ download_mandoc() {
     rm -f "$deb"
   fi
 
-  curl -fsSL "$url" -o "$deb"
+  # A passing network error must not fail the build: retry, with bounded waits, and say which URL failed and why.
+  local curl_status=0
+  curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 30 --max-time 300 "$url" -o "$deb" || curl_status=$?
+  if [[ "$curl_status" -ne 0 ]]; then
+    rm -f "$deb"
+    echo "Download of $url failed (curl exit code $curl_status)" >&2
+    exit 1
+  fi
   local actual
   actual="$(sha256sum "$deb" | awk '{print $1}')"
   if [[ "$actual" != "${mandoc_sha256[$arch]}" ]]; then

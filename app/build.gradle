@@ -66,6 +66,12 @@ android {
         // checked on the compiled 1.0.0-beta4 classes (AiCoreEngine.SDK_VERSION must match).
         // AAR declares minSdk 26; we runtime-guard for API 31+ where AICore service exists.
         implementation "com.google.mlkit:genai-prompt:1.0.0-beta4"
+
+        // LiteRT-LM engine for local .litertlm models (own process, see LitertService). The AAR has arm64-v8a
+        // and x86_64 only and declares minSdk 24; the code guards both. Its POM does not pull the NPU runtime:
+        // the Google Tensor dispatch library (jni/arm64-v8a/libLiteRtDispatch_GoogleTensor.so) is added here.
+        implementation "com.google.ai.edge.litertlm:litertlm-android:0.18.0"
+        implementation "com.google.ai.edge.litert:litert-npu-runtime-google-tensor:2.3.0"
     }
 
     defaultConfig {
@@ -160,6 +166,8 @@ android {
 
     packagingOptions {
         jniLibs {
+            // The LiteRT-LM engine is arm64-v8a only here: the x86_64 build of its library (26 MB) stays out.
+            excludes += ['**/x86_64/liblitertlm_jni.so']
             useLegacyPackaging true
         }
     }
@@ -273,12 +281,17 @@ task downloadBootstraps() {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
         }
 
-        def mandocOverlayResult = providers.exec {
+        // Keep the script's output: by default a failed exec only reports the exit code, which hides the cause.
+        def mandocOverlay = providers.exec {
             workingDir rootProject.projectDir
             commandLine "bash", "scripts/bootstrap/add-mandoc-to-bootstraps.sh"
-        }.result.get()
-        if (mandocOverlayResult.exitValue != 0)
-            throw new GradleException("Failed to add mandoc to bootstrap zips")
+            ignoreExitValue = true
+        }
+        def mandocExitValue = mandocOverlay.result.get().exitValue
+        if (mandocExitValue != 0)
+            throw new GradleException("Failed to add mandoc to bootstrap zips (exit " + mandocExitValue + ")\n" +
+                "--- stdout ---\n" + mandocOverlay.standardOutput.asText.get() + "\n" +
+                "--- stderr ---\n" + mandocOverlay.standardError.asText.get())
     }
 }
 
