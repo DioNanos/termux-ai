@@ -53,6 +53,7 @@ JP_REST=""
 JP_ERR=""
 JP_STR=""
 JP_TYPE=""
+JSON_ROOT_TYPE=""
 
 jp_fail() { JP_ERR="$1"; return 1; }
 
@@ -61,11 +62,31 @@ jp_skip_ws() {
   JP_REST="${JP_REST#"$lead"}"
 }
 
+# jp_seg KEY: the path segment of an object key. Letters, digits, _ and - stay as they are; every other byte
+# becomes %HH, and the empty key is a lone "%". A segment therefore never contains a ".", so the "." that joins
+# segments is unambiguous, and no key can look like a nested path, an array index or the empty path.
+jp_seg() {
+  local key="$1" out="" i ch code LC_ALL=C
+  if [ -z "$key" ]; then JP_SEG="%"; return 0; fi
+  if [[ "$key" =~ ^[A-Za-z0-9_-]+$ ]]; then JP_SEG="$key"; return 0; fi
+  for (( i = 0; i < ${#key}; i++ )); do
+    ch="${key:i:1}"
+    if [[ "$ch" =~ ^[A-Za-z0-9_-]$ ]]; then
+      out+="$ch"
+    else
+      printf -v code '%%%02X' "'$ch"
+      out+="$code"
+    fi
+  done
+  JP_SEG="$out"
+}
+
 jp_record() {
   local path="$1" value="$2" type="$3"
   JP_TYPE="$type"
+  # The root value has the empty path: only its type is kept (JSON_ROOT_TYPE).
   [ -n "$path" ] || return 0
-  [[ "$path" =~ ^[A-Za-z0-9_.-]+$ ]] || return 0
+  [[ "$path" =~ ^[A-Za-z0-9_%.-]+$ ]] || { jp_fail "internal error: unexpected path"; return 1; }
   J["$path"]="$value"
   JT["$path"]="$type"
 }
@@ -167,7 +188,11 @@ jp_object() {
     jp_skip_ws
     [ "${JP_REST:0:1}" = ":" ] || { jp_fail "expected ':'"; return 1; }
     JP_REST="${JP_REST:1}"
-    if [ -z "$path" ]; then child="$key"; else child="$path.$key"; fi
+    jp_seg "$key"
+    if [ -z "$path" ]; then child="$JP_SEG"; else child="$path.$JP_SEG"; fi
+    # A repeated key would let a later value replace an earlier one (or keep the descendants of a replaced
+    # object): refuse it instead of picking one.
+    [[ -z "${JT[$child]+set}" ]] || { jp_fail "duplicate object key"; return 1; }
     jp_value "$child" $(( depth + 1 )) || return 1
     jp_skip_ws
     case "${JP_REST:0:1}" in
@@ -199,8 +224,10 @@ json_parse() {
   J=()
   JT=()
   JP_ERR=""
+  JSON_ROOT_TYPE=""
   JP_REST="$1"
   jp_value "" 0 || return 1
+  JSON_ROOT_TYPE="$JP_TYPE"
   jp_skip_ws
   [ -z "$JP_REST" ] || { jp_fail "trailing data after the JSON value"; return 1; }
   return 0
@@ -382,9 +409,10 @@ handle_response() {
     fi
     emit_error "$mode" "$(describe_app_error)" "$EX_APP"
   fi
-  # A generate answer without data.text is unusable in either mode.
-  if [ "$kind" = "text" ] && [ "${JT[data.text]:-}" != "string" ]; then
-    emit_error "$mode" "response from the Termux AI app has no data.text" "$EX_APP"
+  # A generate answer without data.text is unusable in either mode. The paths are unambiguous, so these are
+  # the types of the root's own "data" and of that object's "text".
+  if [ "$kind" = "text" ] && { [ "${JT[data]:-}" != "object" ] || [ "${JT[data.text]:-}" != "string" ]; }; then
+    emit_error "$mode" "response from the Termux AI app has no data.text (data must be an object with a text string)" "$EX_APP"
   fi
   if [ "$mode" = "json" ] || [ "$kind" != "text" ]; then
     printf '%s\n' "$raw"

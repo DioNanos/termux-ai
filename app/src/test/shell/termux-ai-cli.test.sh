@@ -71,6 +71,23 @@ parser_valid=(
 for doc in "${parser_valid[@]}"; do
   parses "$doc"; check "parser accepts: ${doc:0:40}" $? "$JP_ERR"
 done
+# paths are unambiguous: a key is never confused with a nested path, an empty key never reaches the root
+parses '{"a.b":1,"a":{"b":2}}'
+[ "${J[a%2Eb]}" = "1" ] && [ "${J[a.b]}" = "2" ]; check "parser keeps the key a.b apart from a nested a -> b" $?
+parses '{"ok":false,"":{"ok":true}}'
+[ "${J[ok]}" = "false" ] && [ "${JT[ok]}" = "boolean" ]; check "parser: an empty key cannot overwrite a root field" $?
+parses '{"x":[1],"x.0":2}'
+[ "${J[x.0]}" = "1" ] && [ "${J[x%2E0]}" = "2" ]; check "parser keeps an array element apart from a key that looks like its path" $?
+parses '{"%":1,"":2}'
+[ "${J[%25]}" = "1" ] && [ "${J[%]}" = "2" ]; check "parser keeps the key % apart from the empty key" $?
+parses '{"a":1,"a":2}'; [ $? -ne 0 ]; check "parser rejects a duplicate key" $?
+parses '{"a":{"b":1,"b":2}}'; [ $? -ne 0 ]; check "parser rejects a duplicate key in a nested object" $?
+parses '{"a":{},"a":1}'; [ $? -ne 0 ]; check "parser rejects a key repeated after an object" $?
+parses '[1,{"a":1}]'
+[ "${JSON_ROOT_TYPE}" = "array" ]; check "parser reports the type of the root value" $?
+parses '{"a":1}'
+[ "${JSON_ROOT_TYPE}" = "object" ]; check "parser reports an object root" $?
+
 parser_invalid=(
   '' '   ' '{' '{"ok":tru' '{"ok":true,}' '[1,]' '{"a":1} x' '"abc' 'nan' '{"a":"\ud800"}'
   '{"a":"\udc00"}' '{"a":"\ux"}' '{"a":01}' '{"a":"line
@@ -152,6 +169,18 @@ variants=(
   '{"ok":"yes"}|no ok field'
   '{"ok":true,"data":{"text":"x"}} trailing|malformed response'
   '{"ok":true}|no data.text'
+  '{"ok":false,"error":"must fail","":{"ok":true},"data":{"text":"bypass"}}|must fail'
+  '{"ok":true,"data.text":"impostor"}|no data.text'
+  '{"ok":true,"data":{"text":"first"},"data":{}}|malformed response'
+  '{"ok":true,"data":{"text":"a","text":"b"}}|malformed response'
+  '{"ok":false,"ok":true,"data":{"text":"x"}}|malformed response'
+  '{"ok":true,"data":"x"}|no data.text'
+  '{"ok":true,"data":["text"]}|no data.text'
+  '{"ok":true,"data":null}|no data.text'
+  '{"ok":true,"data":{"":"x"}}|no data.text'
+  '{"ok":true,"":{"data":{"text":"x"}}}|no data.text'
+  '{"ok":true,"data":{"text":1}}|no data.text'
+  '[{"ok":true,"data":{"text":"x"}}]|no ok field'
 )
 for entry in "${variants[@]}"; do
   variant="${entry%%|*}"; reason="${entry#*|}"
@@ -175,6 +204,12 @@ run_cli aicore generate hello
 [ "$RC" -ne 0 ] && grep -q "empty completion" "$WORK/err"; check "an empty completion is an error in text mode" $?
 run_cli aicore generate --json hello
 [ "$RC" -eq 0 ] && grep -q '"ok":true' "$WORK/out"; check "an empty completion in --json mode is passed through" $?
+
+# keys that contain dots or are empty are kept apart from the paths they look like
+printf '%s\n' '{"ok":true,"data":{"text":"fine","":{"text":"x"},"a.b":"1","a":{"b":"2"}}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli aicore generate hello
+[ "$RC" -eq 0 ] && [ "$(cat "$WORK/out")" = "fine" ]; check "dotted and empty keys inside data do not change data.text" $? "rc=$RC out=$(cat "$WORK/out")"
 
 printf '%s\n' '{"ok":true,"data":{"text":"he said \"hi\"\nline2\\end è","finish_reason":"stop"}}' > "$WORK/resp"
 start_stub reply "$WORK/resp"

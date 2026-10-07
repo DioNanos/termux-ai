@@ -14,7 +14,6 @@ import com.google.mlkit.genai.prompt.TextPart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * ML Kit GenAI Prompt behind {@link GenAiPort}. One client per model
@@ -23,38 +22,36 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class MlKitGenAiPort : GenAiPort {
 
-    private val clients = ConcurrentHashMap<ModelSelection, GenerativeModel>()
+    /** One client per selection, built once even when several requests arrive together. */
+    private val clients = ModelClientCache<ModelSelection, GenerativeModel>(
+        { selection -> Generation.getClient(configFor(selection)) },
+        { model -> model.close() }
+    )
 
-    private fun client(selection: ModelSelection): GenerativeModel =
-        clients.getOrPut(selection) { Generation.getClient(configFor(selection)) }
-
-    /** After a failure the client may be stale: drop it so the next call builds a new one. */
-    private fun evict(selection: ModelSelection) {
-        val old = clients.remove(selection) ?: return
-        try { old.close() } catch (ignored: Throwable) {}
-    }
-
-    private inline fun <T> guarded(selection: ModelSelection, block: () -> T): T {
+    /**
+     * Runs [block] on the client of [selection]. After a failure that client may be stale: it is dropped (and closed)
+     * so the next call builds a new one, unless another request has already replaced it.
+     */
+    private inline fun <T> guarded(selection: ModelSelection, block: (GenerativeModel) -> T): T {
+        var model: GenerativeModel? = null
         try {
-            return block()
+            model = clients.get(selection)
+            return block(model)
         } catch (t: Throwable) {
-            evict(selection)
+            if (model != null) clients.evict(selection, model)
             throw GenAiErrors.map(t)
         }
     }
 
-    override fun checkStatus(selection: ModelSelection): Int = guarded(selection) {
-        val model = client(selection)
+    override fun checkStatus(selection: ModelSelection): Int = guarded(selection) { model ->
         runBlocking(Dispatchers.IO) { model.checkStatus() }
     }
 
-    override fun baseModelName(selection: ModelSelection): String = guarded(selection) {
-        val model = client(selection)
+    override fun baseModelName(selection: ModelSelection): String = guarded(selection) { model ->
         runBlocking(Dispatchers.IO) { model.getBaseModelName() }
     }
 
-    override fun capabilities(selection: ModelSelection): GenAiPort.Capabilities = guarded(selection) {
-        val model = client(selection)
+    override fun capabilities(selection: ModelSelection): GenAiPort.Capabilities = guarded(selection) { model ->
         runBlocking(Dispatchers.IO) {
             GenAiPort.Capabilities(
                 runCatching { model.getTokenLimit() }.getOrNull(),
@@ -67,8 +64,7 @@ class MlKitGenAiPort : GenAiPort {
     }
 
     override fun download(selection: ModelSelection, listener: GenAiPort.ProgressListener) {
-        guarded(selection) {
-            val model = client(selection)
+        guarded(selection) { model ->
             runBlocking(Dispatchers.IO) {
                 model.download().collect { status ->
                     when (status) {
@@ -81,8 +77,7 @@ class MlKitGenAiPort : GenAiPort {
         }
     }
 
-    override fun generate(selection: ModelSelection, params: GenParams): GenResult = guarded(selection) {
-        val model = client(selection)
+    override fun generate(selection: ModelSelection, params: GenParams): GenResult = guarded(selection) { model ->
         val request = requestFor(params)
         val response: GenerateContentResponse = runBlocking(Dispatchers.IO) { model.generateContent(request) }
         resultOf(response)
@@ -92,8 +87,7 @@ class MlKitGenAiPort : GenAiPort {
         selection: ModelSelection,
         params: GenParams,
         listener: GenAiPort.ChunkListener
-    ): GenResult = guarded(selection) {
-        val model = client(selection)
+    ): GenResult = guarded(selection) { model ->
         val request = requestFor(params)
         val text = StringBuilder()
         var finish = "other"
