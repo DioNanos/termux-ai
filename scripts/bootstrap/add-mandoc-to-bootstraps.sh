@@ -5,15 +5,17 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work_root="${repo_root}/app/build/termux-ai-mandoc-bootstrap"
 bootstrap_dir="${repo_root}/app/src/main/cpp"
 termux_ai_cli_asset="${repo_root}/app/src/main/assets/termux-ai"
-mirror_base="${TERMUX_MANDOC_MIRROR:-https://termux.librehat.com/apt/termux-main}"
+mirror_base="${TERMUX_MANDOC_MIRROR:-https://packages-cf.termux.dev/apt/termux-main}"
 
 mkdir -p "$work_root"
 
+mandoc_version="1.14.6-8"
+
 declare -A mandoc_sha256=(
-  [aarch64]="23da45c8f7e5954f4c7cd4d30631f1b0b6844009b36a1204b1e43bc7d8bd7dd3"
-  [arm]="823107dd0870101620e8ee92a807dd9ea1d49c80aeca463bc277fbb6bf501f19"
-  [i686]="aebd9521a4df679b3728e777a12201e4a640662cfcc2fe07a21e94e9460dec8e"
-  [x86_64]="f78fa2c6875cf82027a6b6d54f17b0a43381e9dfd1a99e76affd66fcc22ea1b6"
+  [aarch64]="0ee5a68f4dbbda882226e6ae41e1450fb5e902a80e6f86916601db791aa18b48"
+  [arm]="b82cbf0ef1a31b8dc3ff42f5d022ba8fa32f5692de2446b0fc5a8fec0316a5dd"
+  [i686]="078dba7b066edd33360108e61d092c4c6ebd99a5e3d0aef8ebf1ca5dab611563"
+  [x86_64]="6e2f353778c907e18f2ed867af18e685a96ea55e6bf7d7784111f2cca2f9ec73"
 )
 
 declare -A mandoc_size=(
@@ -25,8 +27,8 @@ declare -A mandoc_size=(
 
 download_mandoc() {
   local arch="$1"
-  local deb="${work_root}/mandoc_1.14.6-6_${arch}.deb"
-  local url="${mirror_base}/pool/main/m/mandoc/mandoc_1.14.6-6_${arch}.deb"
+  local deb="${work_root}/mandoc_${mandoc_version}_${arch}.deb"
+  local url="${mirror_base}/pool/main/m/mandoc/mandoc_${mandoc_version}_${arch}.deb"
 
   if [[ -f "$deb" ]]; then
     local actual
@@ -84,7 +86,7 @@ Package: mandoc
 Architecture: ${arch}
 Installed-Size: ${mandoc_size[$arch]}
 Maintainer: Joshua Kahn @TomJo2000
-Version: 1.14.6-6
+Version: ${mandoc_version}
 Homepage: https://mdocml.bsd.lv/
 Breaks: man
 Depends: less, libandroid-glob, zlib
