@@ -91,7 +91,12 @@ public final class LitertEngine {
             try {
                 reply = worker.call(request.toString(), deadlineMs);
             } catch (LitertFailure f) {
-                if (f.code == LitertErrorCode.DEADLINE_EXCEEDED) worker.cancel(params.requestId);
+                if (f.code == LitertErrorCode.DEADLINE_EXCEEDED) {
+                    worker.cancel(params.requestId);
+                    // The deadline frees this side, not the worker: its inference may still be running.
+                    throw new LitertFailure(f.code, backend, f.phase, params.model,
+                        f.getMessage() + "; the :litert process may still be finishing this request, and a new one is answered BUSY until it has", f);
+                }
                 throw withContext(f, backend, params.model);
             }
             return unwrap(reply, params);

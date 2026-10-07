@@ -56,7 +56,19 @@ class LiteRtLmRuntime(
         override fun generate(
             prompt: String, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
         ): LitertRuntime.Output {
-            cancelled = false
+            try {
+                // A cancel that reached this engine before inference began still holds.
+                if (cancelled) throw cancelledFailure()
+                return generateOnce(prompt, maxTokens, temperature, topK, topP, seed)
+            } finally {
+                // The flag belongs to this request only: it must not cancel the next one.
+                cancelled = false
+            }
+        }
+
+        private fun generateOnce(
+            prompt: String, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
+        ): LitertRuntime.Output {
             val conversation = try {
                 engine.createConversation(
                     ConversationConfig(
@@ -70,6 +82,7 @@ class LiteRtLmRuntime(
             }
             active.set(conversation)
             try {
+                if (cancelled) throw cancelledFailure()
                 val reply = conversation.sendMessage(prompt)
                 if (cancelled) throw cancelledFailure()
                 return LitertRuntime.Output(text(reply), "other")

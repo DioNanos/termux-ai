@@ -10,11 +10,7 @@ import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
 
-import org.json.JSONObject;
-
 import java.io.File;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * The LiteRT-LM engine, in its own process ({@code :litert}, not exported). A native crash here ends this process
@@ -27,8 +23,8 @@ public final class LitertService extends Service {
     static final String KEY_JSON = "json";
 
     private LitertRunner runner;
+    private LitertIpcDispatcher dispatcher;
     private HandlerThread thread;
-    private ExecutorService generator;
     private Messenger messenger;
 
     @Override public void onCreate() {
@@ -38,7 +34,7 @@ public final class LitertService extends Service {
         runner = new LitertRunner(new LiteRtLmRuntime(getApplicationInfo().nativeLibraryDir, cache.getPath()), System::currentTimeMillis);
         thread = new HandlerThread("litert-ipc");
         thread.start();
-        generator = Executors.newSingleThreadExecutor(r -> new Thread(r, "litert-generate"));
+        dispatcher = new LitertIpcDispatcher(runner);
         messenger = new Messenger(new Handler(thread.getLooper(), this::onMessage));
     }
 
@@ -49,20 +45,8 @@ public final class LitertService extends Service {
         if (json == null) return true;
         Messenger replyTo = message.replyTo;
         int correlation = message.arg1;
-        if (isGenerate(json)) {
-            generator.execute(() -> reply(replyTo, correlation, runner.handle(json)));
-        } else {
-            reply(replyTo, correlation, runner.handle(json));
-        }
+        dispatcher.dispatch(json, answer -> reply(replyTo, correlation, answer));
         return true;
-    }
-
-    private static boolean isGenerate(String json) {
-        try {
-            return "generate".equals(new JSONObject(json).optString("op"));
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     private static void reply(Messenger replyTo, int correlation, String json) {
@@ -80,7 +64,6 @@ public final class LitertService extends Service {
     @Override public IBinder onBind(Intent intent) { return messenger.getBinder(); }
 
     @Override public void onDestroy() {
-        generator.shutdownNow();
         runner.shutdown();
         thread.quit();
         super.onDestroy();

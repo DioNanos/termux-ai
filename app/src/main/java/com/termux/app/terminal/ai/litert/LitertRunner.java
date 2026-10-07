@@ -28,6 +28,8 @@ public final class LitertRunner {
 
     private String activeRequestId;
     private volatile LitertRuntime.Loaded activeLoaded;
+    /** A cancel for the active request, kept from the moment it arrives: it holds while the model is loading too. */
+    private boolean cancelRequested;
 
     public LitertRunner(LitertRuntime runtime, LongSupplier clockMs) {
         this.runtime = runtime;
@@ -65,6 +67,7 @@ public final class LitertRunner {
                     "request " + activeRequestId + " is still running");
             }
             activeRequestId = requestId;
+            cancelRequested = false;
         }
         try {
             return run(request, requestId, modelId, backend);
@@ -72,6 +75,7 @@ public final class LitertRunner {
             synchronized (lock) {
                 activeRequestId = null;
                 activeLoaded = null;
+                cancelRequested = false;
             }
         }
     }
@@ -80,6 +84,7 @@ public final class LitertRunner {
         String modelPath = request.getString("model_path");
         int context = request.getInt("context_tokens");
         long start = clockMs.getAsLong();
+        if (isCancelRequested()) return cancelledReply(backend, modelId, "before the model was loaded");
         boolean reused = loaded != null && loadedBackend == backend && loadedContext == context && loadedModelPath.equals(modelPath);
         if (!reused) {
             closeLoaded();
@@ -97,7 +102,11 @@ public final class LitertRunner {
             loadedContext = context;
         }
         long loadedAt = clockMs.getAsLong();
-        activeLoaded = loaded;
+        // One critical section: a cancel either is seen here (no inference starts) or finds the engine and stops it.
+        synchronized (lock) {
+            if (cancelRequested) return cancelledReply(backend, modelId, "while the model was loading");
+            activeLoaded = loaded;
+        }
         LitertRuntime.Output output;
         try {
             output = loaded.generate(request.getString("prompt"), request.getInt("max_tokens"),
@@ -127,12 +136,27 @@ public final class LitertRunner {
 
     private String cancel(JSONObject request) throws JSONException {
         String requestId = request.getString("request_id");
-        LitertRuntime.Loaded target;
+        LitertRuntime.Loaded target = null;
+        boolean active;
         synchronized (lock) {
-            target = requestId.equals(activeRequestId) ? activeLoaded : null;
+            active = requestId.equals(activeRequestId);
+            if (active) {
+                cancelRequested = true;
+                target = activeLoaded;
+            }
         }
         if (target != null) target.cancel();
-        return new JSONObject().put("ok", true).put("data", new JSONObject().put("cancelled", target != null)).toString();
+        // True for the active request in any phase: while it loads there is nothing to stop yet, and the request
+        // will not start inference once the load ends.
+        return new JSONObject().put("ok", true).put("data", new JSONObject().put("cancelled", active)).toString();
+    }
+
+    private boolean isCancelRequested() {
+        synchronized (lock) { return cancelRequested; }
+    }
+
+    private static String cancelledReply(LitertBackend backend, String modelId, String when) {
+        return error(LitertErrorCode.CANCELLED, "init", backend.wire, modelId, "the request was cancelled " + when);
     }
 
     private String status() throws JSONException {

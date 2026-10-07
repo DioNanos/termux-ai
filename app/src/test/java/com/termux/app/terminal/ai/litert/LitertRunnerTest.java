@@ -167,4 +167,61 @@ public class LitertRunnerTest {
         assertEquals("close", runtime.log.get(runtime.log.size() - 1));
         assertEquals("idle", json(runner.handle("{\"op\":\"status\"}")).getJSONObject("data").getString("state"));
     }
+
+    /** The runner answers a request on its own thread so that a runner that wrongly waits shows as a failed assertion. */
+    private String handleOnThread(String json, long waitMs) throws Exception {
+        String[] out = new String[1];
+        Thread t = new Thread(() -> out[0] = runner.handle(json));
+        t.start();
+        t.join(waitMs);
+        return out[0];
+    }
+
+    @Test public void aCancelDuringTheLoadStopsTheRequestBeforeAnyInference() throws Exception {
+        runtime.loading = new CountDownLatch(1);
+        runtime.releaseLoad = new CountDownLatch(1);
+        String[] first = new String[1];
+        Thread t = new Thread(() -> { try { first[0] = runner.handle(request("slow", "cpu", "m")); } catch (Exception e) { throw new RuntimeException(e); } });
+        t.start();
+        assertTrue(runtime.loading.await(5, TimeUnit.SECONDS));
+        // The engine is still being opened: there is no engine to cancel, but the request is the active one.
+        assertTrue(json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"slow\"}")).getJSONObject("data").getBoolean("cancelled"));
+        assertFalse("another request id is still not the active one", json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"other\"}")).getJSONObject("data").getBoolean("cancelled"));
+        runtime.releaseLoad.countDown();
+        t.join(5000);
+        JSONObject reply = json(first[0]);
+        assertFalse(reply.getBoolean("ok"));
+        assertEquals("CANCELLED", reply.getString("error_name"));
+        assertTrue(reply.getString("error").contains("loading"));
+        assertEquals("no inference was started", 0, runtime.log.stream().filter(l -> l.startsWith("generate")).count());
+        // The engine that was opened is kept, and the next request is not cancelled by the old one.
+        runtime.loading = null;
+        runtime.releaseLoad = null;
+        JSONObject next = json(runner.handle(request("next", "cpu", "m")));
+        assertTrue(next.getBoolean("ok"));
+        assertTrue(next.getJSONObject("data").getBoolean("engine_reused"));
+    }
+
+    @Test public void aCancelThatCameAfterTheRequestEndedDoesNotCancelTheNextOne() throws Exception {
+        runner.handle(request("done", "cpu", "m"));
+        assertFalse(json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"done\"}")).getJSONObject("data").getBoolean("cancelled"));
+        assertTrue(json(runner.handle(request("after", "cpu", "m"))).getBoolean("ok"));
+    }
+
+    @Test public void aBusyWorkerAnswersAtOnceWhateverThePreviousRequestIsDoing() throws Exception {
+        runtime.generating = new CountDownLatch(1);
+        runtime.release = new CountDownLatch(1);
+        Thread t = new Thread(() -> runner.handle(requestUnchecked("one")));
+        t.start();
+        assertTrue(runtime.generating.await(5, TimeUnit.SECONDS));
+        String second = handleOnThread(requestUnchecked("two"), 2000);
+        runtime.release.countDown();
+        t.join(5000);
+        assertTrue("a second request must be answered while the first runs", second != null);
+        assertEquals("BUSY", json(second).getString("error_name"));
+    }
+
+    private static String requestUnchecked(String id) {
+        try { return request(id, "cpu", "m"); } catch (Exception e) { throw new RuntimeException(e); }
+    }
 }

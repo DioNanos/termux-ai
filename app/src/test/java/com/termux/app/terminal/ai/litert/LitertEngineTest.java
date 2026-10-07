@@ -153,6 +153,20 @@ public class LitertEngineTest {
         assertEquals(1, worker.calls.size());
     }
 
+    @Test public void aDeadlineSaysThatTheWorkerMayStillBeBusy() throws Exception {
+        worker.failure = new LitertFailure(LitertErrorCode.DEADLINE_EXCEEDED, null, "worker", null, "no reply in time", null);
+        LitertFailure f = failureOf(engine(34), params("slow", "cpu"));
+        assertEquals(LitertErrorCode.DEADLINE_EXCEEDED, f.code);
+        assertEquals("cpu", f.backendRequested);
+        assertEquals("m", f.model);
+        assertTrue(f.getMessage(), f.getMessage().contains("may still be finishing this request"));
+        assertTrue(f.getMessage(), f.getMessage().contains("BUSY"));
+        // The broker is free again; whether the worker is, is the worker's answer.
+        worker.failure = null;
+        worker.reply = "{\"ok\":false,\"error_name\":\"BUSY\",\"phase\":\"generate\",\"error\":\"request slow is still running\"}";
+        assertEquals(LitertErrorCode.BUSY, failureOf(engine(34), params("next", "cpu")).code);
+    }
+
     @Test public void aWorkerErrorKeepsItsCodePhaseAndOriginalMessage() throws Exception {
         worker.reply = "{\"ok\":false,\"error_name\":\"BACKEND_INIT_FAILED\",\"phase\":\"init\",\"error\":\"dispatch rejected the model\"}";
         LitertFailure f = failureOf(engine(34), params("r1", "npu"));
