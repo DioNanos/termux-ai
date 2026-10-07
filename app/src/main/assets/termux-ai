@@ -1,20 +1,209 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.18"
+VERSION="0.118.0-ai.19"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
 SELF="$(basename "$0")"
 
-json_escape() {
-  sed 's/\\/\\\\/g; s/"/\\"/g'
+# Byte-exact handling of UTF-8 text: no locale-dependent character logic.
+export LC_ALL=C
+
+# Exit codes: 0 ok, 1 application error or unusable response, 2 usage or invalid
+# argument, 3 socket not available (nothing was sent), 4 transport failure after
+# the request was sent (never retried).
+EX_APP=1
+EX_USAGE=2
+EX_NOSOCKET=3
+EX_TRANSPORT=4
+
+# json_string TEXT -> a JSON string literal (quotes included), valid for any
+# prompt: multiple lines, tabs, quotes, backslashes, accents, control characters.
+json_string() {
+  local s="$1" i hex ch
+  s=${s//\\/'\\'}
+  s=${s//\"/'\"'}
+  s=${s//$'\n'/'\n'}
+  s=${s//$'\r'/'\r'}
+  s=${s//$'\t'/'\t'}
+  s=${s//$'\b'/'\b'}
+  s=${s//$'\f'/'\f'}
+  for i in 1 2 3 4 5 6 7 11 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+    printf -v hex '\\u%04x' "$i"
+    printf -v ch "\\x$(printf '%02x' "$i")"
+    s=${s//"$ch"/$hex}
+  done
+  printf '"%s"' "$s"
 }
 
 fail_json() {
   local message="$1"
   local code="${2:-1}"
-  printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$message" | json_escape)"
+  printf '{"ok":false,"error":%s}\n' "$(json_string "$message")"
   exit "$code"
+}
+
+# --- strict JSON reader (RFC 8259), pure bash 4+ -----------------------------
+# json_parse DOC fills J[path]=value and JT[path]=type for every scalar and
+# container whose path is made of [A-Za-z0-9_.-]; it validates the whole
+# document, so a truncated, empty or malformed response is never read as data.
+declare -A J=()
+declare -A JT=()
+JP_REST=""
+JP_ERR=""
+JP_STR=""
+JP_TYPE=""
+
+jp_fail() { JP_ERR="$1"; return 1; }
+
+jp_skip_ws() {
+  local lead="${JP_REST%%[!$' \t\n\r']*}"
+  JP_REST="${JP_REST#"$lead"}"
+}
+
+jp_record() {
+  local path="$1" value="$2" type="$3"
+  JP_TYPE="$type"
+  [ -n "$path" ] || return 0
+  [[ "$path" =~ ^[A-Za-z0-9_.-]+$ ]] || return 0
+  J["$path"]="$value"
+  JT["$path"]="$type"
+}
+
+jp_emit_cp() {
+  local cp="$1" piece hex b
+  local -a bytes
+  if (( cp < 128 )); then bytes=("$cp")
+  elif (( cp < 2048 )); then bytes=($(( 192 | (cp >> 6) )) $(( 128 | (cp & 63) )))
+  elif (( cp < 65536 )); then bytes=($(( 224 | (cp >> 12) )) $(( 128 | ((cp >> 6) & 63) )) $(( 128 | (cp & 63) )))
+  else bytes=($(( 240 | (cp >> 18) )) $(( 128 | ((cp >> 12) & 63) )) $(( 128 | ((cp >> 6) & 63) )) $(( 128 | (cp & 63) )))
+  fi
+  for b in "${bytes[@]}"; do
+    printf -v hex '%02x' "$b"
+    printf -v piece "\\x$hex"
+    JP_STR+="$piece"
+  done
+}
+
+# jp_string: JP_REST starts right after the opening quote.
+jp_string() {
+  JP_STR=""
+  local chunk esc hex cp lo
+  while :; do
+    chunk="${JP_REST%%[\"\\]*}"
+    if [ "$chunk" = "$JP_REST" ]; then jp_fail "unterminated string"; return 1; fi
+    if [[ "$chunk" == *[$'\001'-$'\037']* ]]; then jp_fail "control character in string"; return 1; fi
+    JP_STR+="$chunk"
+    JP_REST="${JP_REST:${#chunk}}"
+    if [ "${JP_REST:0:1}" = '"' ]; then JP_REST="${JP_REST:1}"; return 0; fi
+    esc="${JP_REST:1:1}"
+    case "$esc" in
+      '"') JP_STR+='"'; JP_REST="${JP_REST:2}" ;;
+      '\') JP_STR+='\'; JP_REST="${JP_REST:2}" ;;
+      '/') JP_STR+='/'; JP_REST="${JP_REST:2}" ;;
+      b) JP_STR+=$'\b'; JP_REST="${JP_REST:2}" ;;
+      f) JP_STR+=$'\f'; JP_REST="${JP_REST:2}" ;;
+      n) JP_STR+=$'\n'; JP_REST="${JP_REST:2}" ;;
+      r) JP_STR+=$'\r'; JP_REST="${JP_REST:2}" ;;
+      t) JP_STR+=$'\t'; JP_REST="${JP_REST:2}" ;;
+      u)
+        hex="${JP_REST:2:4}"
+        [[ "$hex" =~ ^[0-9a-fA-F]{4}$ ]] || { jp_fail "invalid \\u escape"; return 1; }
+        cp=$(( 16#$hex ))
+        if (( cp >= 55296 && cp <= 56319 )); then
+          [ "${JP_REST:6:2}" = '\u' ] || { jp_fail "lone surrogate"; return 1; }
+          hex="${JP_REST:8:4}"
+          [[ "$hex" =~ ^[0-9a-fA-F]{4}$ ]] || { jp_fail "invalid \\u escape"; return 1; }
+          lo=$(( 16#$hex ))
+          (( lo >= 56320 && lo <= 57343 )) || { jp_fail "lone surrogate"; return 1; }
+          cp=$(( 65536 + ((cp - 55296) << 10) + (lo - 56320) ))
+          JP_REST="${JP_REST:12}"
+        elif (( cp >= 56320 && cp <= 57343 )); then
+          jp_fail "lone surrogate"; return 1
+        else
+          JP_REST="${JP_REST:6}"
+        fi
+        (( cp != 0 )) || { jp_fail "unsupported \\u0000 in string"; return 1; }
+        jp_emit_cp "$cp"
+        ;;
+      *) jp_fail "invalid escape"; return 1 ;;
+    esac
+  done
+}
+
+jp_value() {
+  local path="$1" depth="$2" tok
+  (( depth <= 32 )) || { jp_fail "nesting too deep"; return 1; }
+  jp_skip_ws
+  case "${JP_REST:0:1}" in
+    '{') JP_REST="${JP_REST:1}"; jp_object "$path" "$depth" ;;
+    '[') JP_REST="${JP_REST:1}"; jp_array "$path" "$depth" ;;
+    '"') JP_REST="${JP_REST:1}"; jp_string || return 1; jp_record "$path" "$JP_STR" string ;;
+    t) [[ "$JP_REST" == true* ]] || { jp_fail "invalid literal"; return 1; }
+       JP_REST="${JP_REST:4}"; jp_record "$path" true boolean ;;
+    f) [[ "$JP_REST" == false* ]] || { jp_fail "invalid literal"; return 1; }
+       JP_REST="${JP_REST:5}"; jp_record "$path" false boolean ;;
+    n) [[ "$JP_REST" == null* ]] || { jp_fail "invalid literal"; return 1; }
+       JP_REST="${JP_REST:4}"; jp_record "$path" null null ;;
+    -|[0-9])
+      [[ "$JP_REST" =~ ^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)? ]] || { jp_fail "invalid number"; return 1; }
+      tok="${BASH_REMATCH[0]}"
+      JP_REST="${JP_REST:${#tok}}"; jp_record "$path" "$tok" number ;;
+    '') jp_fail "unexpected end of input"; return 1 ;;
+    *) jp_fail "unexpected character"; return 1 ;;
+  esac
+}
+
+jp_object() {
+  local path="$1" depth="$2" key child
+  jp_skip_ws
+  if [ "${JP_REST:0:1}" = "}" ]; then JP_REST="${JP_REST:1}"; jp_record "$path" "" object; return 0; fi
+  while :; do
+    jp_skip_ws
+    [ "${JP_REST:0:1}" = '"' ] || { jp_fail "expected an object key"; return 1; }
+    JP_REST="${JP_REST:1}"
+    jp_string || return 1
+    key="$JP_STR"
+    jp_skip_ws
+    [ "${JP_REST:0:1}" = ":" ] || { jp_fail "expected ':'"; return 1; }
+    JP_REST="${JP_REST:1}"
+    if [ -z "$path" ]; then child="$key"; else child="$path.$key"; fi
+    jp_value "$child" $(( depth + 1 )) || return 1
+    jp_skip_ws
+    case "${JP_REST:0:1}" in
+      ',') JP_REST="${JP_REST:1}" ;;
+      '}') JP_REST="${JP_REST:1}"; jp_record "$path" "" object; return 0 ;;
+      *) jp_fail "expected ',' or '}'"; return 1 ;;
+    esac
+  done
+}
+
+jp_array() {
+  local path="$1" depth="$2" index=0 child
+  jp_skip_ws
+  if [ "${JP_REST:0:1}" = "]" ]; then JP_REST="${JP_REST:1}"; jp_record "$path" "" array; return 0; fi
+  while :; do
+    if [ -z "$path" ]; then child="$index"; else child="$path.$index"; fi
+    jp_value "$child" $(( depth + 1 )) || return 1
+    index=$(( index + 1 ))
+    jp_skip_ws
+    case "${JP_REST:0:1}" in
+      ',') JP_REST="${JP_REST:1}" ;;
+      ']') JP_REST="${JP_REST:1}"; jp_record "$path" "" array; return 0 ;;
+      *) jp_fail "expected ',' or ']'"; return 1 ;;
+    esac
+  done
+}
+
+json_parse() {
+  J=()
+  JT=()
+  JP_ERR=""
+  JP_REST="$1"
+  jp_value "" 0 || return 1
+  jp_skip_ws
+  [ -z "$JP_REST" ] || { jp_fail "trailing data after the JSON value"; return 1; }
+  return 0
 }
 
 usage() {
@@ -40,10 +229,12 @@ Usage:
   termux-ai camera info
   termux-ai notify TITLE BODY
   termux-ai wifi connection
-  termux-ai aicore info
+  termux-ai aicore info [--stage stable|preview] [--preference full|fast]
   termux-ai aicore models
-  termux-ai aicore download
-  termux-ai aicore generate [--max-tokens N] [--temperature F] PROMPT
+  termux-ai aicore download [--stage stable|preview] [--preference full|fast]
+  termux-ai aicore generate [--max-tokens N] [--temperature F] [--top-k N]
+                            [--stage stable|preview] [--preference full|fast]
+                            [--json|--text] PROMPT
 
 Output is compact JSON by default.
 EOF
@@ -95,17 +286,116 @@ run_broadcast() {
   esac
 }
 
-# Socket path for ANR-safe long-running operations (aicore generate).
-SOCKET_PATH="/data/data/com.termux/files/apps/com.termux/termux-ai/ai.sock"
+# Socket path for ANR-safe long-running operations (aicore). TERMUX_AI_SOCKET
+# overrides it (used by the test stubs).
+SOCKET_PATH="${TERMUX_AI_SOCKET:-/data/data/com.termux/files/apps/com.termux/termux-ai/ai.sock}"
 
-run_socket() {
-  local json_payload="$1"
+# socket_request JSON -> response in SOCKET_RESPONSE.
+# Returns EX_NOSOCKET when there is no socket (nothing was sent) and
+# EX_TRANSPORT when the exchange failed after the request was written.
+SOCKET_ERROR=""
+SOCKET_RESPONSE=""
+socket_request() {
+  local json_payload="$1" response status
+  SOCKET_ERROR=""
+  SOCKET_RESPONSE=""
   if [ ! -S "$SOCKET_PATH" ]; then
-    # Socket not available — fall back to broadcast with warning on stderr
-    printf '{"ok":false,"error":"socket not available, use broadcast as fallback"}\n' >&2
-    return 1
+    SOCKET_ERROR="the Termux AI socket is not available ($SOCKET_PATH)"
+    return "$EX_NOSOCKET"
   fi
-  printf '%s\n' "$json_payload" | nc -U "$SOCKET_PATH" 2>/dev/null
+  if ! command -v nc >/dev/null 2>&1; then
+    SOCKET_ERROR="nc (netcat) is required to talk to the Termux AI socket"
+    return "$EX_NOSOCKET"
+  fi
+  # No set +e / set -e here: toggling errexit inside the function would re-arm
+  # it in the caller and end the script before the error is reported.
+  if response="$(printf '%s\n' "$json_payload" | nc -U "$SOCKET_PATH" 2>/dev/null)"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    SOCKET_ERROR="the connection to the Termux AI socket failed after the request was sent; it was not retried"
+    return "$EX_TRANSPORT"
+  fi
+  if [ -z "${response//[[:space:]]/}" ]; then
+    SOCKET_ERROR="the Termux AI app closed the connection without a response after the request was sent; it was not retried"
+    return "$EX_TRANSPORT"
+  fi
+  SOCKET_RESPONSE="$response"
+}
+
+# tty_sanitize FD VARNAME: text that comes from the model or the app is not
+# trusted. When FD is a terminal, control characters other than newline and tab
+# (ESC, BEL, DEL, the C1 range) are shown as "?" so an answer cannot move the
+# cursor, change the title or write to the clipboard. Pipes and files get the
+# text unchanged.
+tty_sanitize() {
+  [ -t "$1" ] || return 0
+  local -n ref="$2"
+  ref=${ref//[$'\001'-$'\010'$'\013'-$'\037'$'\177']/?}
+  ref=${ref//$'\302'[$'\200'-$'\237']/?}
+}
+
+# emit_error MODE MESSAGE CODE: text mode writes to stderr, json mode writes a
+# JSON error object to stdout. Always exits.
+emit_error() {
+  local mode="$1" message="$2" code="$3"
+  if [ "$mode" = "json" ]; then
+    printf '{"ok":false,"error":%s}\n' "$(json_string "$message")"
+  else
+    tty_sanitize 2 message
+    printf 'termux-ai: error: %s\n' "$message" >&2
+  fi
+  exit "$code"
+}
+
+# describe_app_error: error text of a parsed ok:false response, with the AICore
+# error name, code and retry delay when the app reported them.
+describe_app_error() {
+  local message="${J[error]:-unknown error}" extra=""
+  [ -z "${J[error_name]:-}" ] || extra="${J[error_name]}"
+  if [ -n "${J[error_code]:-}" ]; then extra="${extra:+$extra, }code ${J[error_code]}"; fi
+  if [ -n "${J[retry_delay_ms]:-}" ]; then extra="${extra:+$extra, }retry after ${J[retry_delay_ms]} ms"; fi
+  if [ -n "$extra" ]; then message="$message ($extra)"; fi
+  printf '%s' "$message"
+}
+
+# handle_response MODE KIND RAW: validates RAW and prints it according to MODE.
+# KIND "text" prints data.text in text mode; any other KIND prints the JSON.
+# Exits non-zero for ok:false, an empty or malformed response, or a missing ok.
+handle_response() {
+  local mode="$1" kind="$2" raw="$3"
+  if [ -z "${raw//[[:space:]]/}" ]; then
+    emit_error "$mode" "empty response from the Termux AI app" "$EX_APP"
+  fi
+  if ! json_parse "$raw"; then
+    emit_error "$mode" "malformed response from the Termux AI app: $JP_ERR" "$EX_APP"
+  fi
+  if [ "${JT[ok]:-}" != "boolean" ]; then
+    emit_error "$mode" "response from the Termux AI app has no ok field" "$EX_APP"
+  fi
+  if [ "${J[ok]}" != "true" ]; then
+    if [ "$mode" = "json" ] || [ "$kind" != "text" ]; then
+      printf '%s\n' "$raw"
+      exit "$EX_APP"
+    fi
+    emit_error "$mode" "$(describe_app_error)" "$EX_APP"
+  fi
+  # A generate answer without data.text is unusable in either mode.
+  if [ "$kind" = "text" ] && [ "${JT[data.text]:-}" != "string" ]; then
+    emit_error "$mode" "response from the Termux AI app has no data.text" "$EX_APP"
+  fi
+  if [ "$mode" = "json" ] || [ "$kind" != "text" ]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  if [ -z "${J[data.text]}" ]; then
+    emit_error "$mode" "the model returned an empty completion (finish_reason ${J[data.finish_reason]:-unknown})" "$EX_APP"
+  fi
+  local answer="${J[data.text]}"
+  tty_sanitize 1 answer
+  printf '%s\n' "$answer"
 }
 
 read_stdin_or_args() {
@@ -267,6 +557,44 @@ compat_main() {
   esac
 }
 
+AI_STAGE=""
+AI_PREFERENCE=""
+
+aicore_need_value() {
+  [ "$#" -ge 2 ] || emit_error text "$1 needs a value" "$EX_USAGE"
+}
+
+# aicore_check_selection MODE STAGE PREFERENCE: unknown values are errors, never
+# silently replaced by a default.
+aicore_check_selection() {
+  local mode="$1" stage="$2" preference="$3"
+  case "$stage" in ''|stable|preview) ;; *) emit_error "$mode" "--stage must be stable or preview (got: $stage)" "$EX_USAGE" ;; esac
+  case "$preference" in ''|full|fast) ;; *) emit_error "$mode" "--preference must be full or fast (got: $preference)" "$EX_USAGE" ;; esac
+}
+
+# aicore_parse_selection ARGS...: --stage and --preference only.
+aicore_parse_selection() {
+  AI_STAGE=""
+  AI_PREFERENCE=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --stage) aicore_need_value "$@"; AI_STAGE="$2"; shift 2 ;;
+      --preference) aicore_need_value "$@"; AI_PREFERENCE="$2"; shift 2 ;;
+      *) emit_error text "Unknown option: $1" "$EX_USAGE" ;;
+    esac
+  done
+  aicore_check_selection text "$AI_STAGE" "$AI_PREFERENCE"
+}
+
+# aicore_selection_json STAGE PREFERENCE [LEADING_COMMA]
+aicore_selection_json() {
+  local stage="$1" preference="$2" lead="${3:-}" out=""
+  [ -z "$stage" ] || out="\"stage\":$(json_string "$stage")"
+  if [ -n "$preference" ]; then out="${out:+$out,}\"preference\":$(json_string "$preference")"; fi
+  if [ -n "$out" ] && [ -n "$lead" ]; then out="$lead$out"; fi
+  printf '%s' "$out"
+}
+
 main() {
   if compat_main "$@"; then
     return
@@ -368,21 +696,54 @@ main() {
       local sub="${1:-info}"
       shift || true
       case "$sub" in
-        info)
-          run_broadcast aicore.info
-          ;;
-        models)
-          run_broadcast aicore.models
+        info|models)
+          local stage="" preference=""
+          if [ "$sub" = "models" ] && [ "$#" -gt 0 ]; then
+            emit_error text "aicore models takes no options (it checks all four combinations)" "$EX_USAGE"
+          fi
+          aicore_parse_selection "$@"
+          stage="$AI_STAGE"; preference="$AI_PREFERENCE"
+          local args_json="" extras=()
+          if [ "$sub" = "info" ]; then
+            args_json="$(aicore_selection_json "$stage" "$preference")"
+            [ -z "$stage" ] || extras+=(--es stage "$stage")
+            [ -z "$preference" ] || extras+=(--es preference "$preference")
+          fi
+          # Read-only commands: when the socket cannot be used, the broadcast is
+          # a safe fallback (repeating them changes nothing).
+          local status
+          set +e
+          socket_request "{\"cmd\":\"aicore.$sub\",\"args\":{$args_json}}"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            handle_response json "$sub" "$SOCKET_RESPONSE"
+          else
+            run_broadcast "aicore.$sub" "${extras[@]}"
+          fi
           ;;
         download)
-          run_socket '{"cmd":"aicore.download"}' || run_broadcast aicore.download
+          local stage="" preference="" status
+          aicore_parse_selection "$@"
+          stage="$AI_STAGE"; preference="$AI_PREFERENCE"
+          # A download is long and has an effect: no broadcast fallback and no
+          # retry, whatever goes wrong.
+          set +e
+          socket_request "{\"cmd\":\"aicore.download\",\"args\":{$(aicore_selection_json "$stage" "$preference")}}"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error json "$SOCKET_ERROR" "$status"
+          handle_response json download "$SOCKET_RESPONSE"
           ;;
         generate)
-          local prompt="" max_tokens=256 temperature=0.2 mode="text"
+          local prompt="" max_tokens=256 temperature=0.2 top_k="" stage="" preference="" mode="text"
           while [ "$#" -gt 0 ]; do
             case "$1" in
-              --max-tokens) max_tokens="$2"; shift 2 ;;
-              --temperature) temperature="$2"; shift 2 ;;
+              --max-tokens) aicore_need_value "$@"; max_tokens="$2"; shift 2 ;;
+              --temperature) aicore_need_value "$@"; temperature="$2"; shift 2 ;;
+              --top-k) aicore_need_value "$@"; top_k="$2"; shift 2 ;;
+              --stage) aicore_need_value "$@"; stage="$2"; shift 2 ;;
+              --preference) aicore_need_value "$@"; preference="$2"; shift 2 ;;
               --json) mode="json"; shift ;;
               --text) mode="text"; shift ;;
               --) shift; prompt="$*"; break ;;
@@ -390,22 +751,30 @@ main() {
               *) prompt="$*"; break ;;
             esac
           done
-          [ -n "$prompt" ] || prompt="$(cat -)"
-          [ -n "$prompt" ] || fail_json "Usage: termux-ai aicore generate [--max-tokens N] [--temperature F] PROMPT"
-
-          local raw=""
-          local payload="{\"cmd\":\"aicore.generate\",\"args\":{\"prompt\":$(printf '%s' "$prompt" | json_escape | sed 's/^/"/;s/$/"/'),\"max_tokens\":$max_tokens,\"temperature\":$temperature}}"
-          raw="$(run_socket "$payload" 2>/dev/null)" || {
-            raw="$(run_broadcast aicore.generate --es prompt "$prompt" --ei max_tokens "$max_tokens" --ef temperature "$temperature" 2>&1)" || { printf '%s\n' "$raw"; exit 1; }
-          }
-          if [ "$mode" = "json" ]; then
-            printf '%s\n' "$raw"
-          else
-            printf '%s' "$raw" | sed -n 's/.*"text":"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\n/\n/g; s/\\"/"/g; s/\\\\/\\/g'
+          [[ "$max_tokens" =~ ^[1-9][0-9]*$ ]] || emit_error "$mode" "--max-tokens must be a positive integer" "$EX_USAGE"
+          [[ "$temperature" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || emit_error "$mode" "--temperature must be a number between 0 and 1, such as 0.2" "$EX_USAGE"
+          if [ -n "$top_k" ]; then
+            [[ "$top_k" =~ ^[1-9][0-9]*$ ]] || emit_error "$mode" "--top-k must be a positive integer" "$EX_USAGE"
           fi
+          aicore_check_selection "$mode" "$stage" "$preference"
+          [ -n "$prompt" ] || prompt="$(cat -)"
+          [ -n "$prompt" ] || emit_error "$mode" "Usage: termux-ai aicore generate [--max-tokens N] [--temperature F] [--top-k N] [--stage S] [--preference P] PROMPT" "$EX_USAGE"
+
+          local payload status
+          payload="{\"cmd\":\"aicore.generate\",\"args\":{\"prompt\":$(json_string "$prompt"),\"max_tokens\":$max_tokens,\"temperature\":$temperature"
+          [ -z "$top_k" ] || payload+=",\"top_k\":$top_k"
+          payload+="$(aicore_selection_json "$stage" "$preference" ",")}}"
+          # Once the request is on the wire it is never sent again: no broadcast
+          # replay, no second socket attempt.
+          set +e
+          socket_request "$payload"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error "$mode" "$SOCKET_ERROR" "$status"
+          handle_response "$mode" text "$SOCKET_RESPONSE"
           ;;
         *)
-          fail_json "Usage: termux-ai aicore info|models|download|generate"
+          fail_json "Usage: termux-ai aicore info|models|download|generate" "$EX_USAGE"
           ;;
       esac
       ;;
@@ -418,4 +787,7 @@ main() {
   esac
 }
 
-main "$@"
+# Sourcing the file (tests) only loads the functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

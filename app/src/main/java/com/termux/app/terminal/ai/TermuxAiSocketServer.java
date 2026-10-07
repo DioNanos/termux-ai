@@ -106,12 +106,23 @@ public final class TermuxAiSocketServer {
         public void onClientAccepted(@NonNull LocalSocketManager manager,
                                      @NonNull LocalClientSocket clientSocket) {
             try {
-                StringBuilder request = new StringBuilder();
-                Error readError = clientSocket.readDataOnInputStream(request, false);
-                String response = readError != null
-                    ? error("Read failed: " + readError.getMinimalErrorString())
-                    : dispatch(request.toString().trim());
-                clientSocket.sendDataToOutputStream(response + "\n", false);
+                // The frame ends at the newline: the peer is not expected to close its
+                // side, so nothing is read after it and the model call is never delayed
+                // by the receive timeout. The helper socket class is used as it is.
+                final LocalClientSocket.MutableInt count = new LocalClientSocket.MutableInt(0);
+                AiSocketHandler.handle(
+                    buffer -> {
+                        Error readError = clientSocket.read(buffer, count);
+                        if (readError != null) throw new java.io.IOException(readError.getMinimalErrorString());
+                        return count.value == 0 ? -1 : 1;
+                    },
+                    data -> {
+                        Error sendError = clientSocket.sendDataToOutputStream(
+                            new String(data, StandardCharsets.UTF_8), false);
+                        if (sendError != null) throw new java.io.IOException(sendError.getMinimalErrorString());
+                    },
+                    this::dispatch,
+                    AiRequestFraming.MAX_REQUEST_BYTES);
             } finally {
                 clientSocket.closeClientSocket(false);
             }
@@ -181,19 +192,24 @@ public final class TermuxAiSocketServer {
                     case "storage.write":
                         return ok(storageWrite(args));
                     case "aicore.info":
-                        return ok(aicoreInfo(args));
                     case "aicore.models":
-                        return ok(aicoreModels());
                     case "aicore.generate":
-                        return ok(aicoreGenerate(args));
                     case "aicore.download":
-                        return ok(aicoreDownload());
+                        return ok(aicoreCommands().handle(cmd, args));
                     default:
                         return error("Unknown command: " + cmd);
                 }
+            } catch (AiCoreFailure f) {
+                return error(f);
+            } catch (IllegalArgumentException e) {
+                return error("Invalid request: " + e.getMessage());
             } catch (Exception e) {
                 return error("Invalid request: " + e.getMessage());
             }
+        }
+
+        private AiCoreCommands aicoreCommands() {
+            return new AiCoreCommands(AICoreBackend.engine());
         }
 
         private JSONObject apiList() throws Exception {
@@ -653,70 +669,16 @@ public final class TermuxAiSocketServer {
             }
         }
 
-        private JSONObject aicoreInfo(JSONObject args) throws Exception {
-            boolean sdkOk = AICoreBackend.isSdkSupported();
-            int stage = parseStage(args.optString("stage", "stable"));
-            int preference = parsePreference(args.optString("preference", "full"));
-            boolean available = sdkOk && AICoreBackend.isAvailable(context, stage, preference);
-            JSONObject json = new JSONObject()
-                .put("available", available)
-                .put("sdk_int", Build.VERSION.SDK_INT)
-                .put("stage", args.optString("stage", "stable"))
-                .put("preference", args.optString("preference", "full"))
-                .put("backend", "mlkit-genai-prompt")
-                .put("sdk_version", "1.0.0-beta2")
-                .put("supports_streaming", true)
-                .put("supports_tools", false);
-            String err = AICoreBackend.lastInitError();
-            if (!available && err != null) json.put("error", err);
-            if (!sdkOk) json.put("error", "Android < 12 (API " + Build.VERSION.SDK_INT + ")");
-            return json;
-        }
-
-        private JSONObject aicoreModels() throws Exception {
-            return new JSONObject()
-                .put("models", AICoreBackend.modelsInfo(context));
-        }
-
-        private JSONObject aicoreDownload() throws Exception {
-            if (!AICoreBackend.isSdkSupported())
-                throw new IllegalStateException("AICore requires Android 12+");
-            return AICoreBackend.download(context);
-        }
-
-        private JSONObject aicoreGenerate(JSONObject args) throws Exception {
-            if (!AICoreBackend.isSdkSupported())
-                throw new IllegalStateException("AICore requires Android 12+");
-            String prompt = args.optString("prompt", "").trim();
-            if (prompt.isEmpty()) throw new IllegalArgumentException("prompt is required");
-            int maxTokens = Math.max(1, Math.min(args.optInt("max_tokens", 256), 4096));
-            float temperature = (float) args.optDouble("temperature", 0.2);
-            int stage = parseStage(args.optString("stage", "stable"));
-            int preference = parsePreference(args.optString("preference", "full"));
-
-            return AICoreBackend.generate(context, prompt, maxTokens, temperature, stage, preference);
-        }
-
-        private int parseStage(String s) {
-            switch (s.toLowerCase()) {
-                case "preview": return 1; // ModelReleaseStage.PREVIEW
-                default: return 0; // ModelReleaseStage.STABLE
-            }
-        }
-
-        private int parsePreference(String s) {
-            switch (s.toLowerCase()) {
-                case "fast": return 1; // ModelPreference.FAST
-                default: return 0; // ModelPreference.FULL
-            }
-        }
-
         private String ok(JSONObject data) {
             try {
                 return new JSONObject().put("ok", true).put("data", data).toString();
             } catch (Exception e) {
                 return error(e.getMessage());
             }
+        }
+
+        private String error(AiCoreFailure failure) {
+            return AiCoreCommands.errorJson(failure);
         }
 
         private String error(String message) {

@@ -61,17 +61,18 @@ android {
         implementation project(":termux-shared")
 
         // ML Kit GenAI Prompt API — official artifact (replaces experimental aicore:0.0.1-exp02).
-        // Supports ModelConfig with stage (STABLE/PREVIEW) and preference (FULL/FAST),
-        // checkStatus(), download(), generateContent(), generateContentStream(), countTokens().
+        // ModelConfig (stage STABLE/PREVIEW, preference FULL/FAST) selects the model; temperature,
+        // max output tokens and top-k go on each GenerateContentRequest. The API surface was
+        // checked on the compiled 1.0.0-beta4 classes (AiCoreEngine.SDK_VERSION must match).
         // AAR declares minSdk 26; we runtime-guard for API 31+ where AICore service exists.
-        implementation "com.google.mlkit:genai-prompt:1.0.0-beta2"
+        implementation "com.google.mlkit:genai-prompt:1.0.0-beta4"
     }
 
     defaultConfig {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 133
-        versionName "0.118.0-ai.18"
+        versionCode 134
+        versionName "0.118.0-ai.19"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -182,6 +183,8 @@ android {
 
 dependencies {
     testImplementation "junit:junit:4.13.2"
+    // Real org.json for the plain JVM unit tests (the android.jar one is a stub).
+    testImplementation "org.json:json:20250107"
     testImplementation "org.robolectric:robolectric:4.16.1"
     testImplementation "org.bouncycastle:bcprov-jdk18on:1.81.1"
     coreLibraryDesugaring "com.android.tools:desugar_jdk_libs_nio:2.1.5"
