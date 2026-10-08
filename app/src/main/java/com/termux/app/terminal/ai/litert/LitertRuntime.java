@@ -10,11 +10,13 @@ public interface LitertRuntime {
     Loaded load(String modelPath, LitertBackend backend, int contextTokens) throws LitertFailure;
 
     interface Loaded {
-        /** Runs one generation on a fresh conversation, closed before this returns. Blocks until done or cancelled. */
-        Output generate(String prompt, int maxTokens, double temperature, int topK, double topP, int seed) throws LitertFailure;
-
-        /** Stops the generation that is running, if any. Safe to call from another thread. */
-        void cancel();
+        /**
+         * Runs one generation on a fresh conversation, closed before this returns. Blocks until done or cancelled.
+         * The request's {@code token} is the only way to stop it: the runtime attaches the native stop to the token
+         * for the duration of the generation and detaches it before returning, and it never keeps a cancel for later.
+         */
+        Output generate(String prompt, int maxTokens, double temperature, int topK, double topP, int seed,
+                        LitertCancelToken token) throws LitertFailure;
 
         /** What the runtime could observe about the executor, as plain text; never a claim of execution. */
         String evidence();

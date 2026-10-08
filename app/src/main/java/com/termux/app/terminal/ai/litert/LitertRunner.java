@@ -27,9 +27,13 @@ public final class LitertRunner {
     private int loadedContext;
 
     private String activeRequestId;
-    private volatile LitertRuntime.Loaded activeLoaded;
-    /** A cancel for the active request, kept from the moment it arrives: it holds while the model is loading too. */
-    private boolean cancelRequested;
+    /**
+     * The cancel of the active request, created with it and used by nothing else: a cancel is bound to the request,
+     * never to the engine, so it holds while the model loads and cannot reach a later request.
+     */
+    private LitertCancelToken activeToken;
+    /** The generation of the active request has returned: from then on a cancel has nothing left to stop. */
+    private boolean generationOver;
 
     public LitertRunner(LitertRuntime runtime, LongSupplier clockMs) {
         this.runtime = runtime;
@@ -61,30 +65,34 @@ public final class LitertRunner {
         } catch (LitertFailure f) {
             return error(f.code, "validate", null, modelId, f.getMessage());
         }
+        LitertCancelToken token;
         synchronized (lock) {
             if (activeRequestId != null) {
                 return error(LitertErrorCode.BUSY, "generate", backend.wire, modelId,
                     "request " + activeRequestId + " is still running");
             }
             activeRequestId = requestId;
-            cancelRequested = false;
+            activeToken = new LitertCancelToken();
+            generationOver = false;
+            token = activeToken;
         }
         try {
-            return run(request, requestId, modelId, backend);
+            return run(request, requestId, modelId, backend, token);
         } finally {
             synchronized (lock) {
                 activeRequestId = null;
-                activeLoaded = null;
-                cancelRequested = false;
+                activeToken = null;
+                generationOver = false;
             }
         }
     }
 
-    private String run(JSONObject request, String requestId, String modelId, LitertBackend backend) throws JSONException {
+    private String run(JSONObject request, String requestId, String modelId, LitertBackend backend,
+                       LitertCancelToken token) throws JSONException {
         String modelPath = request.getString("model_path");
         int context = request.getInt("context_tokens");
         long start = clockMs.getAsLong();
-        if (isCancelRequested()) return cancelledReply(backend, modelId, "before the model was loaded");
+        if (token.isCancelled()) return cancelledReply(backend, modelId, "before the model was loaded");
         boolean reused = loaded != null && loadedBackend == backend && loadedContext == context && loadedModelPath.equals(modelPath);
         if (!reused) {
             closeLoaded();
@@ -102,19 +110,22 @@ public final class LitertRunner {
             loadedContext = context;
         }
         long loadedAt = clockMs.getAsLong();
-        // One critical section: a cancel either is seen here (no inference starts) or finds the engine and stops it.
-        synchronized (lock) {
-            if (cancelRequested) return cancelledReply(backend, modelId, "while the model was loading");
-            activeLoaded = loaded;
-        }
+        // The generation itself checks the token as it starts and attaches the native stop to it atomically, so a
+        // cancel that arrived during the load is honoured there and one that arrives later reaches the inference.
+        if (token.isCancelled()) return cancelledReply(backend, modelId, "while the model was loading");
         LitertRuntime.Output output;
         try {
             output = loaded.generate(request.getString("prompt"), request.getInt("max_tokens"),
-                request.getDouble("temperature"), request.getInt("top_k"), request.getDouble("top_p"), request.getInt("seed"));
+                request.getDouble("temperature"), request.getInt("top_k"), request.getDouble("top_p"), request.getInt("seed"),
+                token);
         } catch (LitertFailure f) {
             return error(f.code, f.phase == null ? "generate" : f.phase, backend.wire, modelId, f.getMessage());
         } catch (RuntimeException e) {
             return error(LitertErrorCode.GENERATION_FAILED, "generate", backend.wire, modelId, describe(e));
+        } finally {
+            // Whatever happened, this request's cancel can no longer stop anything.
+            token.detach();
+            synchronized (lock) { generationOver = true; }
         }
         long done = clockMs.getAsLong();
         boolean cpu = backend == LitertBackend.CPU;
@@ -136,23 +147,14 @@ public final class LitertRunner {
 
     private String cancel(JSONObject request) throws JSONException {
         String requestId = request.getString("request_id");
-        LitertRuntime.Loaded target = null;
-        boolean active;
+        LitertCancelToken token = null;
         synchronized (lock) {
-            active = requestId.equals(activeRequestId);
-            if (active) {
-                cancelRequested = true;
-                target = activeLoaded;
-            }
+            // Only the request that is active, and whose generation has not returned, can still be cancelled; a
+            // cancel for a request that already finished is a no-op.
+            if (requestId.equals(activeRequestId) && !generationOver) token = activeToken;
         }
-        if (target != null) target.cancel();
-        // True for the active request in any phase: while it loads there is nothing to stop yet, and the request
-        // will not start inference once the load ends.
-        return new JSONObject().put("ok", true).put("data", new JSONObject().put("cancelled", active)).toString();
-    }
-
-    private boolean isCancelRequested() {
-        synchronized (lock) { return cancelRequested; }
+        if (token != null) token.cancel();
+        return new JSONObject().put("ok", true).put("data", new JSONObject().put("cancelled", token != null)).toString();
     }
 
     private static String cancelledReply(LitertBackend backend, String modelId, String when) {

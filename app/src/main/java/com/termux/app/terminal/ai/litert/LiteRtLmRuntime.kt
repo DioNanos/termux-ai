@@ -9,7 +9,6 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import java.io.File
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The LiteRT-LM SDK behind [LitertRuntime]. It lives in the `:litert` process only. One engine is opened on
@@ -50,25 +49,14 @@ class LiteRtLmRuntime(
     private fun cpuThreads(): Int = Runtime.getRuntime().availableProcessors().coerceIn(1, MAX_CPU_THREADS)
 
     private class Loaded(private val engine: Engine, private val backend: LitertBackend) : LitertRuntime.Loaded {
-        private val active = AtomicReference<Conversation?>(null)
-        @Volatile private var cancelled = false
 
         override fun generate(
             prompt: String, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
+            token: LitertCancelToken,
         ): LitertRuntime.Output {
-            try {
-                // A cancel that reached this engine before inference began still holds.
-                if (cancelled) throw cancelledFailure()
-                return generateOnce(prompt, maxTokens, temperature, topK, topP, seed)
-            } finally {
-                // The flag belongs to this request only: it must not cancel the next one.
-                cancelled = false
-            }
-        }
-
-        private fun generateOnce(
-            prompt: String, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
-        ): LitertRuntime.Output {
+            // The cancel belongs to the request's token, not to this engine: nothing is remembered here, so a cancel
+            // can never reach the next request that runs on the same engine.
+            if (token.isCancelled) throw cancelledFailure()
             val conversation = try {
                 engine.createConversation(
                     ConversationConfig(
@@ -80,27 +68,24 @@ class LiteRtLmRuntime(
             } catch (e: Exception) {
                 throw failure(LitertErrorCode.GENERATION_FAILED, backend, "generate", e)
             }
-            active.set(conversation)
+            // Attached under the token's lock: a cancel that arrived meanwhile stops the conversation right away.
+            token.onCancel { runCatching { conversation.cancelProcess() } }
             try {
-                if (cancelled) throw cancelledFailure()
+                if (token.isCancelled) throw cancelledFailure()
                 val reply = conversation.sendMessage(prompt)
-                if (cancelled) throw cancelledFailure()
+                if (token.isCancelled) throw cancelledFailure()
                 return LitertRuntime.Output(text(reply), "other")
             } catch (e: LitertFailure) {
                 throw e
             } catch (e: Exception) {
-                if (cancelled) throw cancelledFailure()
+                if (token.isCancelled) throw cancelledFailure()
                 throw failure(classify(e), backend, "generate", e)
             } finally {
-                active.set(null)
+                // From here a cancel has nothing to stop: it is detached before the conversation is closed.
+                token.detach()
                 // The conversation is closed before the engine can be: close() runs only when nothing is generating.
                 runCatching { conversation.close() }
             }
-        }
-
-        override fun cancel() {
-            cancelled = true
-            active.get()?.let { runCatching { it.cancelProcess() } }
         }
 
         override fun evidence(): String = mappedExecutorLibraries()

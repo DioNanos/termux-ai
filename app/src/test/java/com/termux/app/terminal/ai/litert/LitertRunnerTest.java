@@ -224,4 +224,66 @@ public class LitertRunnerTest {
     private static String requestUnchecked(String id) {
         try { return request(id, "cpu", "m"); } catch (Exception e) { throw new RuntimeException(e); }
     }
+
+    // --- the cancel belongs to its request, not to the engine -------------------------------------------------
+
+    @Test public void aCancelThatArrivesAfterTheGenerationHasEndedDoesNotCancelTheNextRequest() throws Exception {
+        runtime.inEvidence = new CountDownLatch(1);
+        runtime.releaseEvidence = new CountDownLatch(1);
+        String[] first = new String[1];
+        Thread t = new Thread(() -> { try { first[0] = runner.handle(request("one", "cpu", "m")); } catch (Exception e) { throw new RuntimeException(e); } });
+        t.start();
+        // The inference of "one" has finished; the runner is only collecting the evidence for the reply.
+        assertTrue(runtime.inEvidence.await(5, TimeUnit.SECONDS));
+        JSONObject late = json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"one\"}"));
+        assertFalse("nothing is left to stop: the cancel is a no-op", late.getJSONObject("data").getBoolean("cancelled"));
+        runtime.releaseEvidence.countDown();
+        t.join(5000);
+        assertTrue(json(first[0]).getBoolean("ok"));
+        runtime.inEvidence = null;
+        runtime.releaseEvidence = null;
+        JSONObject second = json(runner.handle(request("two", "cpu", "m")));
+        assertTrue("the next request on the same engine must not be cancelled: " + second, second.getBoolean("ok"));
+        assertTrue(second.getJSONObject("data").getBoolean("engine_reused"));
+        assertEquals("no native stop was ever triggered", 0, runtime.stopsTriggered.get());
+    }
+
+    @Test public void aCancelOfAFinishedRequestIsANoOpOnTheEngine() throws Exception {
+        runner.handle(request("done", "cpu", "m"));
+        assertFalse(json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"done\"}")).getJSONObject("data").getBoolean("cancelled"));
+        assertTrue(json(runner.handle(request("after", "cpu", "m"))).getBoolean("ok"));
+        assertEquals(0, runtime.stopsTriggered.get());
+    }
+
+    @Test public void aCancelDuringTheGenerationStopsOnlyThatGeneration() throws Exception {
+        runtime.generating = new CountDownLatch(1);
+        runtime.release = new CountDownLatch(1);
+        String[] first = new String[1];
+        Thread t = new Thread(() -> { try { first[0] = runner.handle(request("one", "cpu", "m")); } catch (Exception e) { throw new RuntimeException(e); } });
+        t.start();
+        assertTrue(runtime.generating.await(5, TimeUnit.SECONDS));
+        assertTrue(json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"one\"}")).getJSONObject("data").getBoolean("cancelled"));
+        t.join(5000);
+        assertEquals("CANCELLED", json(first[0]).getString("error_name"));
+        assertEquals(1, runtime.stopsTriggered.get());
+        // The engine is reused and the next request runs to the end.
+        runtime.release = null;
+        runtime.generating = null;
+        assertTrue(json(runner.handle(request("two", "cpu", "m"))).getBoolean("ok"));
+        assertEquals("the second request triggered no stop", 1, runtime.stopsTriggered.get());
+    }
+
+    @Test public void aCancelThatCameDuringTheLoadIsHonouredAtTheStartOfTheGeneration() throws Exception {
+        runtime.loading = new CountDownLatch(1);
+        runtime.releaseLoad = new CountDownLatch(1);
+        String[] first = new String[1];
+        Thread t = new Thread(() -> { try { first[0] = runner.handle(request("slow", "cpu", "m")); } catch (Exception e) { throw new RuntimeException(e); } });
+        t.start();
+        assertTrue(runtime.loading.await(5, TimeUnit.SECONDS));
+        assertTrue(json(runner.handle("{\"op\":\"cancel\",\"request_id\":\"slow\"}")).getJSONObject("data").getBoolean("cancelled"));
+        runtime.releaseLoad.countDown();
+        t.join(5000);
+        assertEquals("CANCELLED", json(first[0]).getString("error_name"));
+        assertEquals(0, runtime.log.stream().filter(l -> l.startsWith("generate")).count());
+    }
 }
