@@ -298,4 +298,54 @@ public class LitertRunnerTest {
         assertFalse("a new engine, not the suspect one", next.getJSONObject("data").getBoolean("engine_reused"));
         assertEquals(2, runtime.log.stream().filter(l -> l.startsWith("load")).count());
     }
+
+    // --- a native stop that blocks never blocks the IPC thread ------------------------------------------------
+
+    @Test public void aBlockedNativeStopNeverBlocksTheCancelTheStatusOrTheNextRequest() throws Exception {
+        runtime.generating = new CountDownLatch(1);
+        runtime.release = new CountDownLatch(1);
+        runtime.stopHold = new CountDownLatch(1);      // cancelProcess blocks until the test lets it go
+        runtime.finishWaitMs = 300;
+        String[] first = new String[1];
+        Thread t = new Thread(() -> { try { first[0] = runner.handle(request("one", "cpu", "m")); } catch (Exception e) { throw new RuntimeException(e); } });
+        t.start();
+        assertTrue(runtime.generating.await(5, TimeUnit.SECONDS));
+
+        // The cancel arrives on the one IPC thread: it must be answered at once, whatever the native stop does.
+        String cancel = handleOnThread("{\"op\":\"cancel\",\"request_id\":\"one\"}", 2000);
+        assertTrue("the cancel must not wait for the native stop", cancel != null);
+        assertTrue(json(cancel).getJSONObject("data").getBoolean("cancelled"));
+
+        // The generation gives up on the stuck stop with the typed error.
+        t.join(5000);
+        assertEquals("CANCEL_TIMEOUT", json(first[0]).getString("error_name"));
+
+        // The service still answers: the status says a stop is running ...
+        String status = handleOnThread("{\"op\":\"status\"}", 2000);
+        assertTrue("status must answer while a stop is stuck", status != null);
+        JSONObject data = json(status).getJSONObject("data");
+        assertEquals("stopping", data.getString("state"));
+        assertEquals("running", data.getString("native_stop"));
+
+        // ... and a new generate gets an immediate, typed answer instead of hanging.
+        String busy = handleOnThread(request("two", "cpu", "m"), 2000);
+        assertTrue("a new generate must be answered while a stop is stuck", busy != null);
+        assertEquals("BUSY", json(busy).getString("error_name"));
+        assertTrue(json(busy).getString("error").contains("native cancel"));
+        assertEquals("no second inference was started", 1, runtime.log.stream().filter(l -> l.startsWith("generate")).count());
+
+        // A second cancel (any request) adds no thread: the stopper is the one in flight.
+        assertFalse(json(handleOnThread("{\"op\":\"cancel\",\"request_id\":\"two\"}", 2000)).getJSONObject("data").getBoolean("cancelled"));
+
+        // The stop returns: the worker is free, on a new engine.
+        runtime.stopHold.countDown();
+        long end = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < end && !"none".equals(json(runner.handle("{\"op\":\"status\"}")).getJSONObject("data").getString("native_stop"))) Thread.sleep(10);
+        runtime.release = null;
+        runtime.generating = null;
+        runtime.stopHold = null;
+        JSONObject next = json(runner.handle(request("three", "cpu", "m")));
+        assertTrue("accepted again once the stop returned: " + next, next.getBoolean("ok"));
+        assertFalse("the engine of the stuck stop was dropped", next.getJSONObject("data").getBoolean("engine_reused"));
+    }
 }

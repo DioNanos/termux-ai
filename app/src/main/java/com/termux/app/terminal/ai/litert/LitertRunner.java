@@ -20,6 +20,8 @@ public final class LitertRunner {
     private final LitertRuntime runtime;
     private final LongSupplier clockMs;
     private final Object lock = new Object();
+    /** The one thread that runs native stops; at most one stop is ever in flight for this worker. */
+    private final LitertStopper stopper = new LitertStopper();
 
     private LitertRuntime.Loaded loaded;
     private String loadedModelPath;
@@ -71,8 +73,14 @@ public final class LitertRunner {
                 return error(LitertErrorCode.BUSY, "generate", backend.wire, modelId,
                     "request " + activeRequestId + " is still running");
             }
+            // A native stop that has not returned (after CANCEL_TIMEOUT it can stay stuck) keeps the worker busy:
+            // the answer is immediate and typed, never a wait.
+            if (stopper.isBusy()) {
+                return error(LitertErrorCode.BUSY, "generate", backend.wire, modelId,
+                    "a native cancel is still running; a new request is refused until it returns");
+            }
             activeRequestId = requestId;
-            activeToken = new LitertCancelToken();
+            activeToken = new LitertCancelToken(stopper);
             generationOver = false;
             token = activeToken;
         }
@@ -167,7 +175,8 @@ public final class LitertRunner {
     private String status() throws JSONException {
         synchronized (lock) {
             JSONObject data = new JSONObject()
-                .put("state", activeRequestId != null ? "busy" : (loaded != null ? "loaded" : "idle"))
+                .put("state", activeRequestId != null ? "busy" : (stopper.isBusy() ? "stopping" : (loaded != null ? "loaded" : "idle")))
+                .put("native_stop", stopper.isBusy() ? "running" : "none")
                 .put("loaded_model_path", loaded != null ? loadedModelPath : JSONObject.NULL)
                 .put("loaded_backend", loaded != null ? loadedBackend.wire : JSONObject.NULL);
             return new JSONObject().put("ok", true).put("data", data).toString();

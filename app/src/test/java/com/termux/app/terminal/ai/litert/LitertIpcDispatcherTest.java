@@ -66,6 +66,8 @@ public class LitertIpcDispatcherTest {
         assertEquals("busy", new JSONObject(await("status", 2000)).getJSONObject("data").getString("state"));
         send("cancel", "{\"op\":\"cancel\",\"request_id\":\"one\"}");
         assertTrue(new JSONObject(await("cancel", 2000)).getJSONObject("data").getBoolean("cancelled"));
+        long end = System.currentTimeMillis() + 2000;
+        while (System.currentTimeMillis() < end && !runtime.log.contains("cancel")) Thread.sleep(5);
         assertTrue("the runtime was asked to stop", runtime.log.contains("cancel"));
         assertEquals("CANCELLED", new JSONObject(await("one", 5000)).getString("error_name"));
     }

@@ -4,8 +4,9 @@ package com.termux.app.terminal.ai.litert;
  * The cancel of ONE request. It is created when the request is accepted and belongs to it alone, so a cancel can
  * never reach the next request that happens to use the same engine: the engine keeps no cancel state of its own.
  *
- * <p>The stop (the native call that interrupts an inference) runs on the thread that cancels, outside the lock, so
- * it can take as long as it needs without blocking anyone. What must never happen is the conversation being closed
+ * <p>The stop (the native call that interrupts an inference) runs on the {@link LitertStopper} thread, never on the
+ * thread that cancels and never under the lock, so it can take as long as it needs without blocking the caller (the
+ * service's only IPC thread) or anyone else. What must never happen is the conversation being closed
  * while that stop is still running, or a stop starting on a conversation that is already closed. {@link #finish}
  * is the end of a generation: it first detaches the stop (no new stop can start after it) and then waits, up to a
  * declared limit, for a stop that is already running; only then does it let the conversation be closed.
@@ -14,51 +15,49 @@ public final class LitertCancelToken {
     /** The longest a generation waits for a running native stop before giving up on closing its conversation. */
     public static final long STOP_WAIT_MS = 5_000L;
 
+    private final LitertStopper stopper;
     private boolean cancelled;
     private Runnable action;
-    /** A stop has been taken and is running (or about to run) on some thread. */
+    /** A stop has been handed to the stopper and has not returned yet. */
     private boolean stopping;
+
+    public LitertCancelToken(LitertStopper stopper) { this.stopper = stopper; }
 
     public synchronized boolean isCancelled() { return cancelled; }
 
-    /** Marks the request cancelled and, if an inference is attached, stops it. Safe from any thread; idempotent. */
-    public void cancel() {
-        Runnable stop;
-        synchronized (this) {
-            if (cancelled) return;
-            cancelled = true;
-            stop = action;
-            action = null;
-            // Taking the action and marking it running is one step: finish() can never see "detached" and
-            // "no stop" while a stop has already been taken.
-            if (stop != null) stopping = true;
-        }
-        if (stop != null) runStop(stop);
+    /**
+     * Marks the request cancelled and, if an inference is attached, hands its stop to the stopper and returns at
+     * once. Safe from any thread; idempotent.
+     */
+    public synchronized void cancel() {
+        if (cancelled) return;
+        cancelled = true;
+        Runnable stop = action;
+        action = null;
+        if (stop != null) handOff(stop);
     }
 
-    /** Attaches the action that stops the running inference; it runs at once if the request is already cancelled. */
-    public void onCancel(Runnable stop) {
-        boolean runNow;
-        synchronized (this) {
-            runNow = cancelled;
-            if (runNow) {
-                stopping = true;
-            } else {
-                action = stop;
-            }
+    /** Attaches the action that stops the running inference; it is handed to the stopper at once if already cancelled. */
+    public synchronized void onCancel(Runnable stop) {
+        if (cancelled) {
+            handOff(stop);
+        } else {
+            action = stop;
         }
-        if (runNow) runStop(stop);
     }
 
-    private void runStop(Runnable stop) {
-        try {
-            stop.run();
-        } finally {
-            synchronized (this) {
-                stopping = false;
-                notifyAll();
-            }
+    /** Called with the lock held. Taking the stop and marking it running is one step, so finish() cannot miss it. */
+    private void handOff(Runnable stop) {
+        stopping = true;
+        if (!stopper.tryStart(stop, this::stopReturned)) {
+            // Another stop is in flight (one per engine): this cancel marks the request and nothing more.
+            stopping = false;
         }
+    }
+
+    private synchronized void stopReturned() {
+        stopping = false;
+        notifyAll();
     }
 
     /**

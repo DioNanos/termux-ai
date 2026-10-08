@@ -23,6 +23,10 @@ final class FakeRuntime implements LitertRuntime {
     volatile boolean cancelled;
     /** False models a slow cancellation: the native inference keeps running after the stop was triggered. */
     boolean cancelStopsGeneration = true;
+    /** When set, the native stop blocks on it after having let the generation go (a stuck cancelProcess). */
+    CountDownLatch stopHold;
+    /** How long the generation waits for a running stop before CANCEL_TIMEOUT. */
+    long finishWaitMs = LitertCancelToken.STOP_WAIT_MS;
     /** How many generations ever saw their own cancel, and how many started: a cancel of one must not touch another. */
     final java.util.concurrent.atomic.AtomicInteger stopsTriggered = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -46,7 +50,13 @@ final class FakeRuntime implements LitertRuntime {
                     stopsTriggered.incrementAndGet();
                     cancelled = true;
                     if (cancelStopsGeneration && release != null) release.countDown();
+                    if (stopHold != null) {
+                        try { stopHold.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    }
                 });
+                LitertFailure failure = null;
+                RuntimeException crash = null;
+                Output output = null;
                 try {
                     if (generating != null) generating.countDown();
                     if (release != null) {
@@ -55,10 +65,20 @@ final class FakeRuntime implements LitertRuntime {
                     if (token.isCancelled()) throw cancelledFailure(backend);
                     if (generateFailure != null) throw generateFailure;
                     if (generateCrash != null) throw generateCrash;
-                    return new Output("answer", "stop");
-                } finally {
-                    token.detach(LitertCancelToken.STOP_WAIT_MS);
+                    output = new Output("answer", "stop");
+                } catch (LitertFailure f) {
+                    failure = f;
+                } catch (RuntimeException e) {
+                    crash = e;
                 }
+                // Like the real adapter: detach, wait (bounded) for a stop in flight, then the conversation could close.
+                if (!token.detach(finishWaitMs)) {
+                    throw new LitertFailure(LitertErrorCode.CANCEL_TIMEOUT, backend.wire, "generate", null,
+                        "the native cancel did not return within " + finishWaitMs + " ms", null);
+                }
+                if (failure != null) throw failure;
+                if (crash != null) throw crash;
+                return output;
             }
 
             @Override public String evidence() {

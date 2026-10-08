@@ -12,25 +12,27 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class LitertCancelTokenTest {
     @Test public void cancelRunsTheAttachedStopOnceEvenIfCalledTwice() {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         AtomicInteger stops = new AtomicInteger();
         token.onCancel(stops::incrementAndGet);
         token.cancel();
         token.cancel();
         assertTrue(token.isCancelled());
+        assertTrue(token.detach(2000));
         assertEquals(1, stops.get());
     }
 
     @Test public void aStopAttachedAfterTheCancelRunsAtOnce() {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         token.cancel();
         AtomicInteger stops = new AtomicInteger();
         token.onCancel(stops::incrementAndGet);
+        assertTrue(token.detach(2000));
         assertEquals("a cancel that came first is not lost", 1, stops.get());
     }
 
     @Test public void aCancelAfterDetachOnlyMarksTheFinishedToken() {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         AtomicInteger stops = new AtomicInteger();
         token.onCancel(stops::incrementAndGet);
         assertTrue(token.detach(1000));
@@ -40,8 +42,8 @@ public class LitertCancelTokenTest {
     }
 
     @Test public void aTokenIsIndependentOfEveryOtherToken() {
-        LitertCancelToken first = new LitertCancelToken();
-        LitertCancelToken second = new LitertCancelToken();
+        LitertCancelToken first = new LitertCancelToken(new LitertStopper());
+        LitertCancelToken second = new LitertCancelToken(new LitertStopper());
         first.cancel();
         assertTrue(first.isCancelled());
         assertFalse(second.isCancelled());
@@ -49,7 +51,7 @@ public class LitertCancelTokenTest {
 
     @Test public void concurrentAttachAndCancelRunTheStopExactlyOnce() throws Exception {
         for (int round = 0; round < 200; round++) {
-            LitertCancelToken token = new LitertCancelToken();
+            LitertCancelToken token = new LitertCancelToken(new LitertStopper());
             AtomicInteger stops = new AtomicInteger();
             CountDownLatch go = new CountDownLatch(1);
             Thread a = new Thread(() -> { await(go); token.onCancel(stops::incrementAndGet); });
@@ -57,6 +59,7 @@ public class LitertCancelTokenTest {
             a.start(); b.start();
             go.countDown();
             a.join(2000); b.join(2000);
+            assertTrue(token.detach(2000));
             assertEquals("round " + round, 1, stops.get());
         }
     }
@@ -86,7 +89,7 @@ public class LitertCancelTokenTest {
     }
 
     @Test public void finishDoesNotCloseWhileAStopIsStillRunning() throws Exception {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         Conversation conversation = new Conversation();
         token.onCancel(conversation::stop);
         Thread canceller = new Thread(token::cancel);
@@ -109,7 +112,7 @@ public class LitertCancelTokenTest {
     }
 
     @Test public void aStopThatNeverReturnsGivesATypedErrorAndTheConversationStaysOpen() throws Exception {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         Conversation conversation = new Conversation();
         token.onCancel(conversation::stop);
         Thread canceller = new Thread(token::cancel);
@@ -129,7 +132,7 @@ public class LitertCancelTokenTest {
     }
 
     @Test public void aStopCannotStartOnceTheGenerationHasFinished() throws Exception {
-        LitertCancelToken token = new LitertCancelToken();
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         Conversation conversation = new Conversation();
         token.onCancel(conversation::stop);
         token.finish(1000, conversation::close);
@@ -142,7 +145,7 @@ public class LitertCancelTokenTest {
     @Test public void theStopDoesNotWaitForTheGenerationSoThereIsNoDeadlock() throws Exception {
         // The stop runs on the canceller's thread and takes no lock the generation needs while it waits.
         for (int round = 0; round < 100; round++) {
-            LitertCancelToken token = new LitertCancelToken();
+            LitertCancelToken token = new LitertCancelToken(new LitertStopper());
             Conversation conversation = new Conversation();
             conversation.stopRelease.countDown();               // a stop that returns promptly
             token.onCancel(conversation::stop);
@@ -160,6 +163,56 @@ public class LitertCancelTokenTest {
             assertEquals("round " + round, 1, outcome.get());
             assertEquals("round " + round, 0, conversation.violations.get());
         }
+    }
+
+    // --- the stop never runs on the thread that cancels -----------------------------------------------------
+
+    @Test public void cancelReturnsAtOnceEvenIfTheNativeStopBlocks() throws Exception {
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        token.onCancel(() -> { entered.countDown(); await(release); });
+        Thread caller = new Thread(token::cancel);
+        long start = System.nanoTime();
+        caller.start();
+        caller.join(2000);
+        assertFalse("cancel() must not wait for the native stop (it runs on the service's only IPC thread)", caller.isAlive());
+        assertTrue("well under the stop's own duration", (System.nanoTime() - start) / 1_000_000L < 1500);
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        assertFalse("the stop is still in flight", token.detach(100));
+        release.countDown();
+        assertTrue(token.detach(2000));
+    }
+
+    @Test public void theStopRunsOnItsOwnThreadNotOnTheCaller() throws Exception {
+        LitertCancelToken token = new LitertCancelToken(new LitertStopper());
+        java.util.concurrent.atomic.AtomicReference<Thread> stopThread = new java.util.concurrent.atomic.AtomicReference<>();
+        token.onCancel(() -> stopThread.set(Thread.currentThread()));
+        token.cancel();
+        assertTrue(token.detach(2000));
+        assertTrue(stopThread.get() != null);
+        assertTrue("not the calling thread", stopThread.get() != Thread.currentThread());
+    }
+
+    @Test public void atMostOneStopIsInFlightPerStopper() throws Exception {
+        LitertStopper stopper = new LitertStopper();
+        LitertCancelToken first = new LitertCancelToken(stopper);
+        LitertCancelToken second = new LitertCancelToken(stopper);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger secondStops = new AtomicInteger();
+        first.onCancel(() -> { entered.countDown(); await(release); });
+        second.onCancel(secondStops::incrementAndGet);
+        first.cancel();
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        assertTrue(stopper.isBusy());
+        second.cancel();
+        assertTrue(second.isCancelled());
+        assertTrue("a refused stop never started and holds no thread", second.detach(100));
+        assertEquals(0, secondStops.get());
+        release.countDown();
+        assertTrue(first.detach(2000));
+        assertFalse("free again after the stop returned", stopper.isBusy());
     }
 
     private static void await(CountDownLatch latch) {
