@@ -8,6 +8,7 @@ Every request line is appended to LOG_PATH (raw). MODE:
   echo          answer ok:true with the received prompt as data.text (ASCII-escaped JSON)
   echo-raw      same, with raw UTF-8 in the JSON string
   drop          read the request, then close without answering (broken transport)
+  hang          a generation never answers (it stays open 30 s); litert.cancel is answered cancelled:true
 """
 import json
 import os
@@ -38,6 +39,13 @@ def handle(conn):
         with log_lock, open(log_path, "ab") as log:
             log.write(line + b"\n")
         if mode == "drop":
+            return
+        if mode == "hang":
+            if json.loads(line.decode("utf-8")).get("cmd") == "litert.cancel":
+                conn.sendall(b'{"ok":true,"data":{"cancelled":true}}\n')
+            else:
+                import time
+                time.sleep(30)
             return
         if mode == "reply":
             with open(arg, "rb") as handle_file:

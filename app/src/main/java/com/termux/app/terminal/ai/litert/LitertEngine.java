@@ -59,6 +59,69 @@ public final class LitertEngine {
             .put("finish_reason", "always other: litertlm-android 0.18.0 does not report why a generation stopped");
     }
 
+    /**
+     * Unloads the model in the worker. A worker that is not running is not started for this. On GPU the worker ends
+     * its process after replying, so the reply can be lost to that very death: the model is gone either way.
+     */
+    public JSONObject unload() throws LitertFailure, JSONException {
+        if (!worker.isConnected()) return new JSONObject().put("unloaded", false).put("state", "not_started");
+        try {
+            return new JSONObject(workerData(new JSONObject().put("op", "unload"))).put("reply_lost", false);
+        } catch (LitertFailure f) {
+            if (f.code != LitertErrorCode.MODEL_WORKER_DIED) throw f;
+            return new JSONObject().put("unloaded", true).put("via", "process_recycle").put("reply_lost", true);
+        }
+    }
+
+    /**
+     * Ends the {@code :litert} process so the next request starts a clean one. It works on a worker that is busy.
+     * A request in flight is lost (MODEL_WORKER_DIED for it); the reply to this call may be lost the same way, and
+     * that is still a successful restart.
+     */
+    public JSONObject restart() throws LitertFailure, JSONException {
+        if (!worker.isConnected()) return new JSONObject().put("restarted", false).put("state", "not_started");
+        try {
+            workerData(new JSONObject().put("op", "restart"));
+            return new JSONObject().put("restarted", true).put("reply_lost", false);
+        } catch (LitertFailure f) {
+            if (f.code != LitertErrorCode.MODEL_WORKER_DIED) throw f;
+            return new JSONObject().put("restarted", true).put("reply_lost", true);
+        }
+    }
+
+    /** One short op to the worker; its {@code data} as text, or the worker's own typed failure. */
+    private String workerData(JSONObject request) throws LitertFailure, JSONException {
+        String op = request.getString("op");
+        String reply = worker.call(request.toString(), STATUS_TIMEOUT_MS);
+        JSONObject json;
+        try {
+            json = new JSONObject(reply);
+        } catch (JSONException e) {
+            throw new LitertFailure(LitertErrorCode.GENERATION_FAILED, null, "worker", null, "malformed reply from the :litert process", e);
+        }
+        if (!json.optBoolean("ok", false)) {
+            throw new LitertFailure(LitertErrorCode.fromName(json.optString("error_name", "")), null,
+                json.optString("phase", op), null, json.optString("error", "the :litert process reported an error"), null);
+        }
+        JSONObject data = json.optJSONObject("data");
+        return (data == null ? new JSONObject() : data).toString();
+    }
+
+    /**
+     * Cancels one request ({@code requestId}) or, with {@code all}, whatever the worker is running, including a
+     * generation nobody is waiting for any more. A worker that is not running is not started for this.
+     */
+    public JSONObject cancel(String requestId, boolean all) throws LitertFailure, JSONException {
+        if (all == (requestId != null)) throw LitertFailure.invalid("cancel needs exactly one of a request id and all");
+        if (!all && !LitertParams.validRequestId(requestId)) {
+            throw LitertFailure.invalid("request_id must be 1 to 64 characters of A-Z a-z 0-9 . _ -");
+        }
+        if (!worker.isConnected()) return new JSONObject().put("cancelled", false).put("state", "not_started");
+        JSONObject request = new JSONObject().put("op", "cancel");
+        if (all) request.put("all", true); else request.put("request_id", requestId);
+        return new JSONObject(workerData(request));
+    }
+
     public JSONObject models() throws JSONException {
         return catalog.list();
     }
@@ -87,6 +150,8 @@ public final class LitertEngine {
                 .put("seed", LitertParams.SEED)
                 .put("native_library_dir", nativeLibraryDir)
                 .put("cache_dir", cacheDir);
+            // Only a precision that was asked for travels: an unasked request is exactly what it was before.
+            if (params.activation != LitertActivation.DEFAULT) request.put("activation", params.activation.wire);
             String reply;
             try {
                 reply = worker.call(request.toString(), deadlineMs);
@@ -134,10 +199,13 @@ public final class LitertEngine {
             .put("model", params.model)
             .put("text", data.optString("text", ""))
             .put("finish_reason", data.optString("finish_reason", "other"))
+            .put("thinking", data.optString("thinking", ""))
+            .put("tool_calls_count", data.optInt("tool_calls_count", 0))
             .put("backend_requested", params.backend.wire)
             .put("backend_effective", verified ? "cpu" : JSONObject.NULL)
             .put("backend_verified", verified)
             .put("backend_evidence", data.optString("backend_evidence", LitertRunner.EVIDENCE_NONE))
+            .put("activation_requested", data.optString("activation_requested", LitertActivation.DEFAULT.wire))
             .put("engine_reused", data.optBoolean("engine_reused", false))
             .put("params", new JSONObject()
                 .put("max_tokens", params.maxTokens)

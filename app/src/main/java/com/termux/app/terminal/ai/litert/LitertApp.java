@@ -13,9 +13,14 @@ public final class LitertApp {
     /** Under the Termux home, so a model is just a file the person put there. Never inside the APK. */
     public static final String MODELS_DIRECTORY = TermuxConstants.TERMUX_HOME_DIR_PATH + "/.local/share/termux-ai/models";
 
+    /** The settings of the local-model engine; read by the :litert process when it starts. */
+    public static final String CONFIG_FILE = TermuxConstants.TERMUX_HOME_DIR_PATH + "/.config/termux-ai/litert.conf";
+
     private static LitertEngine instance;
 
     private LitertApp() {}
+
+    public static LitertConfig config() { return new LitertConfig(new File(CONFIG_FILE)); }
 
     public static synchronized LitertEngine engine(Context context) {
         if (instance == null) {

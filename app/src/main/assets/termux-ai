@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-VERSION="0.118.0-ai.19"
+VERSION="0.118.0-ai.20-rc3"
 ACTION="com.termux.AI_COMMAND"
 RECEIVER="com.termux/com.termux.app.terminal.ai.TermuxAiCommandReceiver"
 SELF="$(basename "$0")"
@@ -9,9 +9,9 @@ SELF="$(basename "$0")"
 # Byte-exact handling of UTF-8 text: no locale-dependent character logic.
 export LC_ALL=C
 
-# Exit codes: 0 ok, 1 application error or unusable response, 2 usage or invalid
-# argument, 3 socket not available (nothing was sent), 4 transport failure after
-# the request was sent (never retried).
+# Exit codes: 0 ok, 1 application error or unusable response, 2 usage, invalid
+# argument or a required tool (nc) that is not installed, 3 socket not available
+# (nothing was sent), 4 transport failure after the request was sent (never retried).
 EX_APP=1
 EX_USAGE=2
 EX_NOSOCKET=3
@@ -264,9 +264,15 @@ Usage:
                             [--json|--text] PROMPT
   termux-ai litert info
   termux-ai litert models
+  termux-ai litert unload
+  termux-ai litert restart
+  termux-ai litert cancel --request-id ID | --all
+  termux-ai litert config [--set idle_unload_ms=MILLISECONDS]
   termux-ai litert generate --backend cpu|gpu|npu --model ID [--max-tokens N]
                             [--temperature F] [--top-k N] [--request-id ID]
-                            [--json|--text] PROMPT
+                            [--activation fp16|fp32] [--json|--text] PROMPT
+
+Requires nc (netcat) for the socket commands: pkg install netcat-openbsd
 
 Output is compact JSON by default.
 EOF
@@ -336,8 +342,8 @@ socket_request() {
     return "$EX_NOSOCKET"
   fi
   if ! command -v nc >/dev/null 2>&1; then
-    SOCKET_ERROR="nc (netcat) is required to talk to the Termux AI socket"
-    return "$EX_NOSOCKET"
+    SOCKET_ERROR="nc (netcat) is required to talk to the Termux AI socket; install it with: pkg install netcat-openbsd"
+    return "$EX_USAGE"
   fi
   # No set +e / set -e here: toggling errexit inside the function would re-arm
   # it in the caller and end the script before the error is reported.
@@ -355,6 +361,24 @@ socket_request() {
     return "$EX_TRANSPORT"
   fi
   SOCKET_RESPONSE="$response"
+}
+
+# litert_cancel_on_signal SIGNAL-NUMBER: the person interrupted a litert generate. Its caller is gone, so the
+# generation is asked to stop (best effort, a few seconds at most) instead of running on and keeping the engine
+# busy; then the CLI exits like a process killed by that signal.
+LITERT_REQUEST_ID=""
+litert_cancel_on_signal() {
+  local number="$1" payload
+  trap - INT TERM HUP
+  payload="{\"cmd\":\"litert.cancel\",\"args\":{\"request_id\":\"$LITERT_REQUEST_ID\"}}"
+  if [ -S "$SOCKET_PATH" ] && command -v nc >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      printf '%s\n' "$payload" | timeout 3 nc -U "$SOCKET_PATH" >/dev/null 2>&1 || true
+    else
+      printf '%s\n' "$payload" | nc -U "$SOCKET_PATH" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit $((128 + number))
 }
 
 # tty_sanitize FD VARNAME: text that comes from the model or the app is not
@@ -817,9 +841,10 @@ main() {
       local sub="${1:-info}"
       shift || true
       case "$sub" in
-        info|models)
+        info|models|unload|restart)
           [ "$#" -eq 0 ] || emit_error text "litert $sub takes no options" "$EX_USAGE"
-          # Read-only, but there is no broadcast path for the local-model engine: the socket is the only way.
+          # There is no broadcast path for the local-model engine: the socket is the only way. unload and restart
+          # act on the :litert process and are never repeated by the CLI.
           local status
           set +e
           socket_request "{\"cmd\":\"litert.$sub\",\"args\":{}}"
@@ -828,8 +853,63 @@ main() {
           [ "$status" -eq 0 ] || emit_error json "$SOCKET_ERROR" "$status"
           handle_response json "$sub" "$SOCKET_RESPONSE"
           ;;
+        cancel)
+          # Stop one generation by its request id, or with --all whatever the worker is running (an orphan whose
+          # caller is gone included). The generation that is stopped answers its own caller with CANCELLED.
+          local cancel_id="" cancel_all="" cancel_args="" status
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --request-id)
+                [ "$#" -ge 2 ] || emit_error text "Usage: termux-ai litert cancel --request-id ID | --all" "$EX_USAGE"
+                cancel_id="$2"; shift 2 ;;
+              --all) cancel_all="yes"; shift ;;
+              *) emit_error text "Usage: termux-ai litert cancel --request-id ID | --all" "$EX_USAGE" ;;
+            esac
+          done
+          if [ -n "$cancel_id" ] && [ -n "$cancel_all" ]; then
+            emit_error text "litert cancel takes --request-id or --all, not both" "$EX_USAGE"
+          fi
+          if [ -z "$cancel_id" ] && [ -z "$cancel_all" ]; then
+            emit_error text "Usage: termux-ai litert cancel --request-id ID | --all" "$EX_USAGE"
+          fi
+          if [ -n "$cancel_id" ]; then
+            [[ "$cancel_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || emit_error text "--request-id must be 1 to 64 characters of A-Z a-z 0-9 . _ -" "$EX_USAGE"
+            cancel_args="\"request_id\":\"$cancel_id\""
+          else
+            cancel_args="\"all\":true"
+          fi
+          set +e
+          socket_request "{\"cmd\":\"litert.cancel\",\"args\":{$cancel_args}}"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error json "$SOCKET_ERROR" "$status"
+          handle_response json cancel "$SOCKET_RESPONSE"
+          ;;
+        config)
+          # Show the settings of the local-model engine, or set idle_unload_ms. The :litert process reads the file
+          # when it starts: litert restart applies a change now.
+          local set_json="" status
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --set)
+                [ "$#" -ge 2 ] || emit_error text "Usage: termux-ai litert config [--set idle_unload_ms=MILLISECONDS]" "$EX_USAGE"
+                [ -z "$set_json" ] || emit_error text "litert config takes --set once" "$EX_USAGE"
+                [[ "$2" =~ ^idle_unload_ms=([0-9]{1,12})$ ]] || emit_error text "--set must be idle_unload_ms=MILLISECONDS (0 turns the idle unload off)" "$EX_USAGE"
+                set_json=",\"set\":{\"idle_unload_ms\":$((10#${BASH_REMATCH[1]}))}"
+                shift 2
+                ;;
+              *) emit_error text "Usage: termux-ai litert config [--set idle_unload_ms=MILLISECONDS]" "$EX_USAGE" ;;
+            esac
+          done
+          set +e
+          socket_request "{\"cmd\":\"litert.config\",\"args\":{${set_json#,}}}"
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || emit_error json "$SOCKET_ERROR" "$status"
+          handle_response json config "$SOCKET_RESPONSE"
+          ;;
         generate)
-          local prompt="" max_tokens="" temperature="" top_k="" backend="" model="" request_id="" mode="text"
+          local prompt="" max_tokens="" temperature="" top_k="" backend="" model="" request_id="" activation="" mode="text"
           while [ "$#" -gt 0 ]; do
             case "$1" in
               --backend) aicore_need_value "$@"; backend="$2"; shift 2 ;;
@@ -838,6 +918,7 @@ main() {
               --max-tokens) aicore_need_value "$@"; max_tokens="$2"; shift 2 ;;
               --temperature) aicore_need_value "$@"; temperature="$2"; shift 2 ;;
               --top-k) aicore_need_value "$@"; top_k="$2"; shift 2 ;;
+              --activation) aicore_need_value "$@"; activation="$2"; shift 2 ;;
               --json) mode="json"; shift ;;
               --text) mode="text"; shift ;;
               --stage|--preference) emit_error "$mode" "$1 is an AICore option; litert takes --backend cpu|gpu|npu" "$EX_USAGE" ;;
@@ -853,7 +934,7 @@ main() {
             *) emit_error "$mode" "--backend must be cpu, gpu or npu (got: $backend)" "$EX_USAGE" ;;
           esac
           [ -n "$model" ] || emit_error "$mode" "--model is required (see: termux-ai litert models)" "$EX_USAGE"
-          [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || emit_error "$mode" "--model must be a model id such as qwen3-0.6b" "$EX_USAGE"
+          [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,2}$ ]] || emit_error "$mode" "--model must be a model id such as qwen3-0.6b or folder/qwen3-0.6b" "$EX_USAGE"
           if [ -n "$request_id" ]; then
             [[ "$request_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || emit_error "$mode" "--request-id must be 1 to 64 characters of A-Z a-z 0-9 . _ -" "$EX_USAGE"
           else
@@ -868,6 +949,11 @@ main() {
           if [ -n "$top_k" ]; then
             [[ "$top_k" =~ ^[1-9][0-9]*$ ]] || emit_error "$mode" "--top-k must be a positive integer" "$EX_USAGE"
           fi
+          # The precision of the activations; left out, the SDK chooses (fp16 on GPU, fp32 on CPU) as before.
+          case "$activation" in
+            ''|fp16|fp32) ;;
+            *) emit_error "$mode" "--activation must be fp16 or fp32 (got: $activation)" "$EX_USAGE" ;;
+          esac
           [ -n "$prompt" ] || prompt="$(cat -)"
           [ -n "$prompt" ] || emit_error "$mode" "Usage: termux-ai litert generate --backend cpu|gpu|npu --model ID [options] PROMPT" "$EX_USAGE"
 
@@ -876,17 +962,24 @@ main() {
           [ -z "$max_tokens" ] || payload+=",\"max_tokens\":$max_tokens"
           [ -z "$temperature" ] || payload+=",\"temperature\":$temperature"
           [ -z "$top_k" ] || payload+=",\"top_k\":$top_k"
+          [ -z "$activation" ] || payload+=",\"activation\":\"$activation\""
           payload+="}}"
-          # Once the request is on the wire it is never sent again: no second attempt, no other backend.
+          # Once the request is on the wire it is never sent again: no second attempt, no other backend. If the person
+          # interrupts the CLI meanwhile, the one extra request sent is the cancel of this very generation.
+          LITERT_REQUEST_ID="$request_id"
+          trap 'litert_cancel_on_signal 2' INT
+          trap 'litert_cancel_on_signal 15' TERM
+          trap 'litert_cancel_on_signal 1' HUP
           set +e
           socket_request "$payload"
           status=$?
           set -e
+          trap - INT TERM HUP
           [ "$status" -eq 0 ] || emit_error "$mode" "$SOCKET_ERROR" "$status"
           handle_response "$mode" text "$SOCKET_RESPONSE"
           ;;
         *)
-          fail_json "Usage: termux-ai litert info|models|generate" "$EX_USAGE"
+          fail_json "Usage: termux-ai litert info|models|unload|restart|cancel|config|generate" "$EX_USAGE"
           ;;
       esac
       ;;

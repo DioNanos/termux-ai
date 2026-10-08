@@ -364,17 +364,158 @@ assert "max_tokens" not in args and "temperature" not in args and "top_k" not in
 PY
 check "without flags the request has a generated request id and no parameters" $?
 
-for badflags in "--model m" "--backend CPU --model m" "--backend tpu --model m" "--backend --model m" "--backend cpu" "--backend cpu --model ../x" "--backend cpu --model a/b" "--backend cpu --model .hidden" "--backend cpu --model m --request-id a/b" "--backend cpu --model m --stage stable" "--backend cpu --model m --preference fast" "--backend cpu --model m --max-tokens 0" "--backend cpu --model m --temperature 1.5" "--backend cpu --model m --top-k 0"; do
+start_stub echo
+: > "$WORK/requests.log"
+run_cli litert generate --backend gpu --model m --activation fp32 hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["activation"] == "fp32" and args["backend"] == "gpu", args
+PY
+check "litert generate --activation fp32 sends the precision" $?
+: > "$WORK/requests.log"
+run_cli litert generate --backend gpu --model m hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert "activation" not in args, args
+PY
+check "without --activation the request carries no activation at all" $?
+for badact in "--activation fp8" "--activation FP32" "--activation default" "--activation" "--activation int8"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert generate --backend gpu --model m $badact hello
+  check "litert generate '$badact' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q -- "--activation fp16|fp32" "$WORK/out"; check "--help lists --activation" $?
+
+for badflags in "--model m" "--backend CPU --model m" "--backend tpu --model m" "--backend --model m" "--backend cpu" "--backend cpu --model ../x" "--backend cpu --model a//b" "--backend cpu --model /abs" "--backend cpu --model a/../b" "--backend cpu --model a/.h" "--backend cpu --model a/b/c/d" "--backend cpu --model .hidden" "--backend cpu --model m --request-id a/b" "--backend cpu --model m --stage stable" "--backend cpu --model m --preference fast" "--backend cpu --model m --max-tokens 0" "--backend cpu --model m --temperature 1.5" "--backend cpu --model m --top-k 0"; do
   : > "$WORK/requests.log"
   # shellcheck disable=SC2086
   run_cli litert generate $badflags hello
   check "litert generate '$badflags' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && [ ! -s "$WORK/out" ] && echo 0 || echo 1)" "rc=$RC requests=$(lrequests)"
 done
 
+start_stub echo
+for id in qwen/q3 qwen/small/q0; do
+  : > "$WORK/requests.log"
+  run_cli litert generate --backend cpu --model "$id" hello
+  python3 - "$WORK/requests.log" "$id" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["model"] == sys.argv[2], args
+PY
+  check "litert generate accepts the folder model id $id and sends it whole" $?
+done
+
 : > "$WORK/requests.log"
 run_cli litert info
 grep -q '"cmd":"litert.info"' "$WORK/requests.log" && [ "$(broadcasts)" -eq 0 ]
 check "litert info goes through the socket" $?
+for verb in unload restart; do
+  printf '%s\n' '{"ok":true,"data":{"unloaded":false,"via":"none"}}' > "$WORK/resp"
+  start_stub reply "$WORK/resp"
+  : > "$WORK/requests.log"
+  run_cli litert $verb
+  python3 - "$WORK/requests.log" "$verb" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert." + sys.argv[2], "args": {}}, req
+PY
+  check "litert $verb sends litert.$verb with no arguments through the socket" $?
+  [ "$RC" -eq 0 ] && [ "$(broadcasts)" -eq 0 ]
+  check "litert $verb: rc 0, no broadcast" $?
+  run_cli litert $verb --force
+  check "litert $verb takes no options (usage rc 2)" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert unload" "$WORK/out" && grep -q "termux-ai litert restart" "$WORK/out"; check "--help lists litert unload and restart" $?
+
+printf '%s\n' '{"ok":true,"data":{"idle_unload_ms":300000,"source":"default"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert config
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.config", "args": {}}, req
+PY
+check "litert config asks for the settings and sets nothing" $?
+: > "$WORK/requests.log"
+run_cli litert config --set idle_unload_ms=60000
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.config", "args": {"set": {"idle_unload_ms": 60000}}}, req
+PY
+check "litert config --set idle_unload_ms=N sends the number" $?
+for bad in "--set idle_unload_ms=abc" "--set idle_unload_ms=" "--set idle_unload_ms=-1" "--set foo=1" "--set" "--set idle_unload_ms=5 --set idle_unload_ms=6" "--force"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert config $bad
+  check "litert config '$bad' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert config" "$WORK/out"; check "--help lists litert config" $?
+
+printf '%s\n' '{"ok":true,"data":{"cancelled":true,"request_id":"r1"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert cancel --request-id r1
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.cancel", "args": {"request_id": "r1"}}, req
+PY
+check "litert cancel --request-id sends that request id" $?
+[ "$RC" -eq 0 ] && [ "$(broadcasts)" -eq 0 ]; check "litert cancel: rc 0, no broadcast" $?
+: > "$WORK/requests.log"
+run_cli litert cancel --all
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.cancel", "args": {"all": True}}, req
+PY
+check "litert cancel --all asks for whatever runs" $?
+for bad in "" "--all --request-id r1" "--request-id" "--request-id a/b" "--request-id ''" "--all extra" "--force" "r1"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  eval run_cli litert cancel $bad
+  check "litert cancel '$bad' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert cancel" "$WORK/out"; check "--help lists litert cancel" $?
+stop_stub; rm -f "$WORK/ai.sock"
+run_cli litert cancel --all
+check "litert cancel: socket absent is rc 3, nothing is broadcast" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+start_stub reply "$WORK/resp"
+
+# A CLI that is interrupted while its generation runs asks for that generation to be cancelled: nobody waits for it.
+signal_run() { # signal_run SIGNAL: a generate in its own process group, hung stub, then the signal to the group
+  start_stub hang
+  : > "$WORK/requests.log"
+  PATH="$WORK/bin:$PATH" TERMUX_AI_SOCKET="$WORK/ai.sock" python3 -c 'import os,sys,signal; os.setsid(); signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("bash", ["bash"] + sys.argv[1:])' "$CLI" litert generate --backend cpu --model m --request-id sig1 hello \
+    > "$WORK/out" 2> "$WORK/err" < /dev/null &
+  local pid=$! i
+  for i in $(seq 1 100); do grep -q '"cmd":"litert.generate"' "$WORK/requests.log" && break; sleep 0.05; done
+  sleep 0.2
+  kill "-$1" -- "-$pid" 2>/dev/null
+  wait "$pid"; RC=$?
+  sleep 0.2
+}
+signal_run INT
+check "an interrupted generate (SIGINT) exits 130" "$([ "$RC" -eq 130 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q '"cmd":"litert.cancel","args":{"request_id":"sig1"}' "$WORK/requests.log"; check "SIGINT: the CLI asks to cancel its own request id" $? "$(cat "$WORK/requests.log")"
+signal_run TERM
+check "a terminated generate (SIGTERM) exits 143" "$([ "$RC" -eq 143 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q '"cmd":"litert.cancel","args":{"request_id":"sig1"}' "$WORK/requests.log"; check "SIGTERM: the CLI asks to cancel its own request id" $?
+printf '%s\n' '{"ok":true,"data":{"text":"done","finish_reason":"stop"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert generate --backend cpu --model m --request-id fine hello
+check "a generate that finishes sends no cancel" "$([ "$RC" -eq 0 ] && ! grep -q 'litert.cancel' "$WORK/requests.log" && echo 0 || echo 1)" "rc=$RC"
+
 run_cli litert models extra
 check "litert models takes no options" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
 run_cli litert download
@@ -397,6 +538,33 @@ run_cli litert generate --backend cpu --model m hello
 check "litert: socket absent, generate is rc 3 and does not broadcast" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
 run_cli litert info
 check "litert: socket absent, info is rc 3 too (there is no broadcast path)" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC broadcasts=$(broadcasts)"
+
+# ------------------------------------------------------------- missing nc (6b)
+# A PATH with every tool of the host except nc: the socket is there, the tool to talk to it is not.
+mkdir -p "$WORK/nonc"
+for tool in /usr/bin/* /bin/*; do
+  case "$(basename "$tool")" in nc|ncat|netcat|nc.openbsd|nc.traditional) continue ;; esac
+  [ -e "$WORK/nonc/$(basename "$tool")" ] || ln -s "$tool" "$WORK/nonc/$(basename "$tool")" 2>/dev/null
+done
+run_cli_nonc() {
+  PATH="$WORK/nonc" TERMUX_AI_SOCKET="$WORK/ai.sock" "$BASH" "$CLI" "$@" > "$WORK/out" 2> "$WORK/err" < /dev/null
+  RC=$?
+}
+PATH="$WORK/nonc" command -v nc >/dev/null 2>&1; check "the no-nc PATH really has no nc" "$([ $? -ne 0 ] && echo 0 || echo 1)"
+
+printf '%s\n' '{"ok":true,"data":{"models":[]}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli_nonc litert models
+check "missing nc: rc 2 (not 3: the socket is there), nothing sent" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+grep -q "pkg install netcat-openbsd" "$WORK/out"
+check "missing nc: the message names the remedy" $? "$(cat "$WORK/out")"
+run_cli_nonc litert generate --backend cpu --model m hello
+check "missing nc: generate is rc 2 too and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+run_cli --help
+grep -q "netcat-openbsd" "$WORK/out"; check "--help lists nc among the requirements" $?
+stop_stub; rm -f "$WORK/ai.sock"
+run_cli_nonc litert info
+check "regression guard: no socket and no nc is still rc 3 (the socket is checked first)" "$([ "$RC" -eq 3 ] && echo 0 || echo 1)" "rc=$RC"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

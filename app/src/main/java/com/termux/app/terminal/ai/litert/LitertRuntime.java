@@ -7,7 +7,7 @@ public interface LitertRuntime {
      *
      * @throws LitertFailure with the SDK's own message
      */
-    Loaded load(String modelPath, LitertBackend backend, int contextTokens) throws LitertFailure;
+    Loaded load(String modelPath, LitertBackend backend, int contextTokens, LitertActivation activation) throws LitertFailure;
 
     interface Loaded {
         /**
@@ -29,10 +29,20 @@ public interface LitertRuntime {
         public final String text;
         /** One of stop, max_tokens, other. */
         public final String finishReason;
+        /** What the model wrote on its thinking channels; empty when it has none. Never part of the answer. */
+        public final String thinking;
+        /** How many tool calls the model asked for; they are not executed. */
+        public final int toolCallsCount;
 
         public Output(String text, String finishReason) {
+            this(text, finishReason, "", 0);
+        }
+
+        public Output(String text, String finishReason, String thinking, int toolCallsCount) {
             this.text = text == null ? "" : text;
             this.finishReason = finishReason;
+            this.thinking = thinking == null ? "" : thinking;
+            this.toolCallsCount = toolCallsCount;
         }
     }
 }

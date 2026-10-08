@@ -86,4 +86,22 @@ public class LitertParamsTest {
         assertEquals(0.0, edge.temperature, 0);
         assertEquals(1, edge.topK);
     }
+
+    @Test public void activationIsDefaultWhenAbsentAndFp16OrFp32WhenAsked() throws Exception {
+        assertEquals(LitertActivation.DEFAULT, LitertParams.fromArgs(base()).activation);
+        assertEquals(LitertActivation.FP32, LitertParams.fromArgs(base().put("activation", "fp32")).activation);
+        assertEquals(LitertActivation.FP16, LitertParams.fromArgs(base().put("activation", "fp16")).activation);
+    }
+
+    @Test public void anyOtherActivationIsRejectedNeverClamped() throws Exception {
+        for (Object bad : new Object[] {"FP32", "fp8", "int8", "default", "", 32}) {
+            try {
+                LitertParams.fromArgs(base().put("activation", bad));
+                fail("expected a rejection of " + bad);
+            } catch (LitertFailure f) {
+                assertEquals(LitertErrorCode.INVALID_ARGUMENT, f.code);
+                assertTrue(f.getMessage(), f.getMessage().contains("activation"));
+            }
+        }
+    }
 }

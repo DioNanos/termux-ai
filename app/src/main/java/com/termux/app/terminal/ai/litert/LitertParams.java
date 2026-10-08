@@ -17,6 +17,12 @@ public final class LitertParams {
     public static final int SEED = 0;
     /** The context the engine is opened with; the output limit is separate. */
     public static final int CONTEXT_TOKENS = 4096;
+    /** How long an engine may sit unused before the {@code :litert} process unloads it (5 minutes). */
+    public static final long DEFAULT_IDLE_UNLOAD_MS = 300_000L;
+    /** How often the idle check runs; an unload can be late by up to this much. */
+    public static final long IDLE_TICK_MS = 10_000L;
+    /** How often the :litert process checks that the caller of a running generation is still alive. */
+    public static final long CALLER_PING_MS = 3_000L;
     /** The request crosses a Binder transaction (about 1 MiB for the whole process): keep the prompt well inside it. */
     public static final int MAX_PROMPT_BYTES = 256 * 1024;
 
@@ -29,9 +35,12 @@ public final class LitertParams {
     public final int maxTokens;
     public final double temperature;
     public final int topK;
+    /** The activation precision asked for; DEFAULT when the request does not say, and then nothing is sent on. */
+    public final LitertActivation activation;
 
     private LitertParams(String requestId, String model, LitertBackend backend, String prompt,
-                         int maxTokens, double temperature, int topK) {
+                         int maxTokens, double temperature, int topK, LitertActivation activation) {
+        this.activation = activation;
         this.requestId = requestId;
         this.model = model;
         this.backend = backend;
@@ -68,8 +77,12 @@ public final class LitertParams {
                 throw LitertFailure.invalid("temperature must be between 0 and " + MAX_TEMPERATURE);
             }
         }
-        return new LitertParams(requestId, model, backend, prompt.trim(), maxTokens, temperature, topK);
+        LitertActivation activation = LitertActivation.parse(string(args, "activation", false));
+        return new LitertParams(requestId, model, backend, prompt.trim(), maxTokens, temperature, topK, activation);
     }
+
+    /** Whether a text is a valid request id (1 to 64 characters of A-Z a-z 0-9 . _ -). */
+    static boolean validRequestId(String id) { return id != null && REQUEST_ID.matcher(id).matches(); }
 
     private static String string(JSONObject args, String name, boolean required) throws LitertFailure {
         Object raw = args.opt(name);
