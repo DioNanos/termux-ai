@@ -286,4 +286,16 @@ public class LitertRunnerTest {
         assertEquals("CANCELLED", json(first[0]).getString("error_name"));
         assertEquals(0, runtime.log.stream().filter(l -> l.startsWith("generate")).count());
     }
+
+    @Test public void aStuckNativeCancelDropsTheEngineWithoutClosingItAndTheNextRequestOpensANewOne() throws Exception {
+        runtime.generateFailure = new LitertFailure(LitertErrorCode.CANCEL_TIMEOUT, "cpu", "generate", null, "the native cancel did not return", null);
+        JSONObject r = json(runner.handle(request("stuck", "cpu", "m")));
+        assertEquals("CANCEL_TIMEOUT", r.getString("error_name"));
+        assertFalse("the engine is abandoned, not closed under a stuck call", runtime.log.contains("close"));
+        runtime.generateFailure = null;
+        JSONObject next = json(runner.handle(request("next", "cpu", "m")));
+        assertTrue(next.getBoolean("ok"));
+        assertFalse("a new engine, not the suspect one", next.getJSONObject("data").getBoolean("engine_reused"));
+        assertEquals(2, runtime.log.stream().filter(l -> l.startsWith("load")).count());
+    }
 }

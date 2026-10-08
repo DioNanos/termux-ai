@@ -57,7 +57,7 @@ final class FakeRuntime implements LitertRuntime {
                     if (generateCrash != null) throw generateCrash;
                     return new Output("answer", "stop");
                 } finally {
-                    token.detach();
+                    token.detach(LitertCancelToken.STOP_WAIT_MS);
                 }
             }
 

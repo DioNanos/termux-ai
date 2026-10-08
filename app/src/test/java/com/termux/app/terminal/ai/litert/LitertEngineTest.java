@@ -192,7 +192,8 @@ public class LitertEngineTest {
         assertEquals(1009, LitertErrorCode.BACKEND_INIT_FAILED.number);
         assertEquals(1011, LitertErrorCode.BUSY.number);
         assertEquals(1015, LitertErrorCode.MODEL_WORKER_DIED.number);
-        assertEquals(16, LitertErrorCode.values().length);
+        assertEquals(17, LitertErrorCode.values().length);
+        assertEquals(1017, LitertErrorCode.CANCEL_TIMEOUT.number);
         java.util.Set<Integer> numbers = new java.util.HashSet<>();
         for (LitertErrorCode c : LitertErrorCode.values()) assertTrue(c.name(), numbers.add(c.number));
     }

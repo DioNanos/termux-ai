@@ -70,22 +70,28 @@ class LiteRtLmRuntime(
             }
             // Attached under the token's lock: a cancel that arrived meanwhile stops the conversation right away.
             token.onCancel { runCatching { conversation.cancelProcess() } }
+            var output: LitertRuntime.Output? = null
+            var problem: LitertFailure? = null
             try {
                 if (token.isCancelled) throw cancelledFailure()
                 val reply = conversation.sendMessage(prompt)
                 if (token.isCancelled) throw cancelledFailure()
-                return LitertRuntime.Output(text(reply), "other")
+                output = LitertRuntime.Output(text(reply), "other")
             } catch (e: LitertFailure) {
-                throw e
+                problem = e
             } catch (e: Exception) {
-                if (token.isCancelled) throw cancelledFailure()
-                throw failure(classify(e), backend, "generate", e)
-            } finally {
-                // From here a cancel has nothing to stop: it is detached before the conversation is closed.
-                token.detach()
-                // The conversation is closed before the engine can be: close() runs only when nothing is generating.
-                runCatching { conversation.close() }
+                problem = if (token.isCancelled) cancelledFailure() else failure(classify(e), backend, "generate", e)
             }
+            // The end of the generation: no new stop can start, and a stop that is already running is waited for
+            // (up to a declared limit) before the conversation is closed. If it never returns the conversation is
+            // left open on purpose and CANCEL_TIMEOUT replaces the result.
+            try {
+                token.finish { runCatching { conversation.close() } }
+            } catch (stuck: LitertFailure) {
+                throw LitertFailure(stuck.code, backend.wire, stuck.phase, null, stuck.message, stuck)
+            }
+            if (problem != null) throw problem
+            return output!!
         }
 
         override fun evidence(): String = mappedExecutorLibraries()

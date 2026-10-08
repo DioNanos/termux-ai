@@ -17,7 +17,9 @@ public enum LitertErrorCode {
     CANCELLED(1013),
     DEADLINE_EXCEEDED(1014),
     MODEL_WORKER_DIED(1015),
-    GENERATION_FAILED(1016);
+    GENERATION_FAILED(1016),
+    /** The native cancel did not return in time; the conversation was left open rather than closed under it. */
+    CANCEL_TIMEOUT(1017);
 
     public final int number;
 

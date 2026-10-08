@@ -119,12 +119,15 @@ public final class LitertRunner {
                 request.getDouble("temperature"), request.getInt("top_k"), request.getDouble("top_p"), request.getInt("seed"),
                 token);
         } catch (LitertFailure f) {
+            // A native cancel that never returned leaves the conversation open: the engine is not trusted any more.
+            // It is dropped without being closed (closing could touch what the stuck call is using); the next
+            // request opens a new one.
+            if (f.code == LitertErrorCode.CANCEL_TIMEOUT) abandonLoaded();
             return error(f.code, f.phase == null ? "generate" : f.phase, backend.wire, modelId, f.getMessage());
         } catch (RuntimeException e) {
             return error(LitertErrorCode.GENERATION_FAILED, "generate", backend.wire, modelId, describe(e));
         } finally {
-            // Whatever happened, this request's cancel can no longer stop anything.
-            token.detach();
+            // The runtime ended the generation (and its cancel) before returning: from here nothing is left to stop.
             synchronized (lock) { generationOver = true; }
         }
         long done = clockMs.getAsLong();
@@ -174,6 +177,13 @@ public final class LitertRunner {
     /** Closes the engine, if one is open. Called when the process is going away. */
     public void shutdown() {
         synchronized (lock) { closeLoaded(); }
+    }
+
+    /** Forgets the engine without closing it. Only for an engine whose native state cannot be trusted. */
+    private void abandonLoaded() {
+        loaded = null;
+        loadedModelPath = null;
+        loadedBackend = null;
     }
 
     private void closeLoaded() {
