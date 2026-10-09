@@ -131,19 +131,45 @@ public class LitertEngineTest {
         assertFalse(engine.info().getBoolean("busy"));
     }
 
-    @Test public void aWorkerThatDiesIsReportedOnceAndNeverReplayed() throws Exception {
+    /** Dies once like the :litert process does around its first spawn, then answers. */
+    private static final class DiesOnce implements LitertWorker {
+        final java.util.List<String> calls = new java.util.ArrayList<>();
+        @Override public String call(String requestJson, long timeoutMs) throws LitertFailure {
+            calls.add(requestJson);
+            if (calls.size() == 1) throw new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "the :litert process died", null);
+            return "{\"ok\":true,\"data\":{\"text\":\"hello\",\"finish_reason\":\"stop\",\"backend_requested\":\"cpu\",\"backend_effective\":\"cpu\",\"backend_verified\":true,\"engine_reused\":false}}";
+        }
+        @Override public boolean isConnected() { return true; }
+        @Override public void cancel(String requestId) { }
+    }
+
+    private LitertEngine engine(LitertWorker worker, int sdk) {
+        LitertGuards guards = new LitertGuards(sdk, Collections.singletonList("arm64-v8a"), name -> libs.test(name));
+        return new LitertEngine(worker, new LitertModelCatalog(modelsDir), guards, sdk, "/native", "/cache", 1000);
+    }
+
+    @Test public void aDeathAroundTheSpawnIsRetriedExactlyOnceAndTheRetryIsDeclared() throws Exception {
+        DiesOnce diesOnce = new DiesOnce();
+        JSONObject out = engine(diesOnce, 34).generate(params("r1", "gpu"));
+        assertEquals("exactly one retry: two calls, one request id both times", 2, diesOnce.calls.size());
+        assertEquals("r1", new JSONObject(diesOnce.calls.get(1)).getString("request_id"));
+        assertEquals("hello", out.getString("text"));
+        assertTrue("the answer says the spawn was retried", out.getBoolean("spawn_retried"));
+    }
+
+    @Test public void aDeathThatRepeatsGetsNoSecondRetryAndStaysTyped() throws Exception {
         worker.failure = new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "the :litert process died", null);
         LitertEngine engine = engine(34);
         LitertFailure f = failureOf(engine, params("r1", "npu"));
         assertEquals(LitertErrorCode.MODEL_WORKER_DIED, f.code);
         assertEquals("npu", f.backendRequested);
         assertEquals("m", f.model);
-        assertEquals(1, worker.calls.size());
+        assertEquals("one retry, then the typed failure", 2, worker.calls.size());
         // The request is over: the next one is accepted (and goes out as its own request).
         worker.failure = null;
         engine.generate(params("r2", "npu"));
-        assertEquals(2, worker.calls.size());
-        assertEquals("r2", new JSONObject(worker.calls.get(1)).getString("request_id"));
+        assertEquals(3, worker.calls.size());
+        assertEquals("r2", new JSONObject(worker.calls.get(2)).getString("request_id"));
     }
 
     @Test public void aDeadlineAsksTheWorkerToCancelThatRequest() throws Exception {
@@ -192,9 +218,276 @@ public class LitertEngineTest {
         assertEquals(1009, LitertErrorCode.BACKEND_INIT_FAILED.number);
         assertEquals(1011, LitertErrorCode.BUSY.number);
         assertEquals(1015, LitertErrorCode.MODEL_WORKER_DIED.number);
-        assertEquals(17, LitertErrorCode.values().length);
+        assertEquals(19, LitertErrorCode.values().length);
+        assertEquals(1019, LitertErrorCode.EMPTY_OUTPUT.number);
         assertEquals(1017, LitertErrorCode.CANCEL_TIMEOUT.number);
         java.util.Set<Integer> numbers = new java.util.HashSet<>();
         for (LitertErrorCode c : LitertErrorCode.values()) assertTrue(c.name(), numbers.add(c.number));
+    }
+
+    @Test public void thinkingAndToolCallsFromTheWorkerReachTheResult() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"text\":\"hi\",\"finish_reason\":\"stop\",\"thinking\":\"because\",\"tool_calls_count\":3}}";
+        JSONObject out = engine(34).generate(params("t1", "cpu"));
+        assertEquals("because", out.getString("thinking"));
+        assertEquals(3, out.getInt("tool_calls_count"));
+    }
+
+    @Test public void aWorkerThatSendsNeitherFieldGivesEmptyValues() throws Exception {
+        JSONObject out = engine(34).generate(params("t2", "cpu"));
+        assertEquals("", out.getString("thinking"));
+        assertEquals(0, out.getInt("tool_calls_count"));
+    }
+
+    @Test public void anEmptyOutputErrorFromTheWorkerKeepsItsCode() throws Exception {
+        worker.reply = "{\"ok\":false,\"error_name\":\"EMPTY_OUTPUT\",\"phase\":\"generate\",\"error\":\"no answer text\"}";
+        assertEquals(LitertErrorCode.EMPTY_OUTPUT, failureOf(engine(34), params("t3", "cpu")).code);
+    }
+
+    // ---- unload / restart from the main process
+
+    @Test public void unloadWithTheWorkerNotStartedDoesNotStartIt() throws Exception {
+        worker.connected = false;
+        JSONObject out = engine(34).unload();
+        assertEquals(0, worker.calls.size());
+        assertFalse(out.getBoolean("unloaded"));
+        assertEquals("not_started", out.getString("state"));
+    }
+
+    @Test public void unloadAsksTheWorkerAndReturnsItsData() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"unloaded\":true,\"via\":\"close\"}}";
+        JSONObject out = engine(34).unload();
+        assertEquals(1, worker.calls.size());
+        assertEquals("unload", new JSONObject(worker.calls.get(0)).getString("op"));
+        assertTrue(out.getBoolean("unloaded"));
+        assertEquals("close", out.getString("via"));
+    }
+
+    @Test public void unloadBusyKeepsItsTypedCode() throws Exception {
+        worker.reply = "{\"ok\":false,\"error_name\":\"BUSY\",\"phase\":\"unload\",\"error\":\"request x is still running\"}";
+        try {
+            engine(34).unload();
+            fail("expected BUSY");
+        } catch (LitertFailure f) {
+            assertEquals(LitertErrorCode.BUSY, f.code);
+        }
+    }
+
+    @Test public void aGpuUnloadWhoseReplyIsLostToTheEndingProcessStillSucceeds() throws Exception {
+        worker.failure = new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "the :litert process died", null);
+        worker.diesAfterReply = true;
+        JSONObject out = engine(34).unload();
+        assertTrue(out.toString(), out.getBoolean("unloaded"));
+        assertTrue(out.getBoolean("reply_lost"));
+    }
+
+    @Test public void restartWithTheWorkerNotStartedDoesNotStartIt() throws Exception {
+        worker.connected = false;
+        JSONObject out = engine(34).restart();
+        assertEquals(0, worker.calls.size());
+        assertFalse(out.getBoolean("restarted"));
+        assertEquals("not_started", out.getString("state"));
+    }
+
+    @Test public void restartAsksTheWorker() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"restarting\":true}}";
+        worker.diesAfterReply = true;
+        JSONObject out = engine(34).restart();
+        assertEquals("restart", new JSONObject(worker.calls.get(0)).getString("op"));
+        assertTrue(out.getBoolean("restarted"));
+        assertFalse(out.getBoolean("reply_lost"));
+    }
+
+    @Test public void aRestartWhoseReplyIsLostToTheDeathItCausedIsASuccess() throws Exception {
+        worker.failure = new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "the :litert process died", null);
+        worker.diesAfterReply = true;
+        JSONObject out = engine(34).restart();
+        assertTrue(out.getBoolean("restarted"));
+        assertTrue(out.getBoolean("reply_lost"));
+    }
+
+    // ---- the bounded wait for an ending worker, and info right after a stop
+
+    /** A worker whose process goes away after a number of connection polls; it answers (or fails) whatever ops it gets. */
+    private static final class EndingWorker implements LitertWorker {
+        final java.util.List<String> calls = new java.util.ArrayList<>();
+        final java.util.concurrent.atomic.AtomicInteger polls = new java.util.concurrent.atomic.AtomicInteger();
+        final int pollsWhileConnected;
+        String reply = "{\"ok\":true,\"data\":{\"unloaded\":true,\"via\":\"process_recycle\"}}";
+        LitertFailure failure;
+        EndingWorker(int pollsWhileConnected) { this.pollsWhileConnected = pollsWhileConnected; }
+        @Override public String call(String requestJson, long timeoutMs) throws LitertFailure {
+            calls.add(requestJson);
+            if (failure != null) throw failure;
+            return reply;
+        }
+        @Override public boolean isConnected() { return polls.getAndIncrement() < pollsWhileConnected; }
+        @Override public void cancel(String requestId) { }
+        boolean gone() { return polls.get() > pollsWhileConnected; }
+    }
+
+    /** Connected all along (a stale binding), every call dies: the shape of info right after a stop on the device. */
+    private static final class StopWindowWorker implements LitertWorker {
+        final java.util.List<String> calls = new java.util.ArrayList<>();
+        final java.util.concurrent.atomic.AtomicInteger polls = new java.util.concurrent.atomic.AtomicInteger();
+        @Override public String call(String requestJson, long timeoutMs) throws LitertFailure {
+            calls.add(requestJson);
+            throw new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "the :litert process died", null);
+        }
+        @Override public boolean isConnected() { return polls.getAndIncrement() != 1; }
+        @Override public void cancel(String requestId) { }
+    }
+
+    private LitertEngine engine(LitertWorker worker, int sdk, java.util.function.LongSupplier clock) {
+        LitertGuards guards = new LitertGuards(sdk, Collections.singletonList("arm64-v8a"), name -> libs.test(name));
+        return new LitertEngine(worker, new LitertModelCatalog(modelsDir), guards, sdk, "/native", "/cache", 1000, clock);
+    }
+
+    @Test public void unloadWaitsForTheEndingWorkerBeforeItAnswers() throws Exception {
+        EndingWorker ending = new EndingWorker(2);
+        JSONObject out = engine(ending, 34).unload();
+        assertTrue("the worker is gone before the answer leaves", ending.gone());
+        assertTrue(out.getBoolean("unloaded"));
+        assertFalse(out.getBoolean("teardown_pending"));
+    }
+
+    @Test public void restartWaitsForTheEndingWorkerBeforeItAnswers() throws Exception {
+        EndingWorker ending = new EndingWorker(2);
+        ending.reply = "{\"ok\":true,\"data\":{\"restarting\":true}}";
+        JSONObject out = engine(ending, 34).restart();
+        assertTrue("the worker is gone before the answer leaves", ending.gone());
+        assertTrue(out.getBoolean("restarted"));
+        assertFalse(out.getBoolean("teardown_pending"));
+    }
+
+    @Test public void anUnloadWhoseWorkerNeverGoesAwayAnswersWithTeardownPending() throws Exception {
+        EndingWorker stuck = new EndingWorker(Integer.MAX_VALUE);
+        JSONObject out = engine(stuck, 34).unload();
+        assertTrue(out.getBoolean("unloaded"));
+        assertTrue("the timer expired without a disconnection", out.getBoolean("teardown_pending"));
+    }
+
+    @Test public void aCpuUnloadThatKeepsTheProcessAliveDoesNotWaitAndIsNotPending() throws Exception {
+        EndingWorker alive = new EndingWorker(Integer.MAX_VALUE);
+        alive.reply = "{\"ok\":true,\"data\":{\"unloaded\":true,\"via\":\"close\"}}";
+        JSONObject out = engine(alive, 34).unload();
+        assertTrue(out.getBoolean("unloaded"));
+        assertEquals("close", out.getString("via"));
+        assertFalse("a live process is not a pending teardown", out.getBoolean("teardown_pending"));
+    }
+
+    @Test public void infoSaysStoppingWhileARecentStopHasTheWorkerDying() throws Exception {
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        StopWindowWorker zombie = new StopWindowWorker();
+        LitertEngine engine = engine(zombie, 34, now::get);
+        engine.unload();
+        assertEquals("stopping", engine.workerStatus().getString("state"));
+    }
+
+    @Test public void infoGoesBackToTypedUnreachableOnceTheStopWindowHasPassed() throws Exception {
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        StopWindowWorker zombie = new StopWindowWorker();
+        LitertEngine engine = engine(zombie, 34, now::get);
+        engine.unload();
+        now.addAndGet(6_000L);
+        try {
+            engine.workerStatus();
+            fail("expected MODEL_WORKER_DIED once the window is over");
+        } catch (LitertFailure f) {
+            assertEquals(LitertErrorCode.MODEL_WORKER_DIED, f.code);
+        }
+    }
+
+    @Test public void aRestartThatTimesOutIsAnError() throws Exception {
+        worker.failure = new LitertFailure(LitertErrorCode.DEADLINE_EXCEEDED, null, "worker", null, "no reply in time", null);
+        try {
+            engine(34).restart();
+            fail("expected DEADLINE_EXCEEDED");
+        } catch (LitertFailure f) {
+            assertEquals(LitertErrorCode.DEADLINE_EXCEEDED, f.code);
+        }
+    }
+
+    @Test public void onGpuTheDefaultPrecisionIsFp32AndOnlyAnExplicitAskChangesIt() throws Exception {
+        engine(34).generate(LitertParams.fromArgs(new JSONObject().put("request_id", "x1").put("model", "m").put("backend", "gpu").put("prompt", "hi").put("activation", "fp32")));
+        assertEquals("fp32", new JSONObject(worker.calls.get(0)).getString("activation"));
+        engine(34).generate(LitertParams.fromArgs(new JSONObject().put("request_id", "x1b").put("model", "m").put("backend", "gpu").put("prompt", "hi").put("activation", "fp16")));
+        assertEquals("fp16", new JSONObject(worker.calls.get(1)).getString("activation"));
+        engine(34).generate(params("x2", "gpu"));
+        assertEquals("left out on gpu, fp32 is what the engine asks for", "fp32", new JSONObject(worker.calls.get(2)).getString("activation"));
+        engine(34).generate(params("x3", "cpu"));
+        assertFalse("on cpu an unasked activation is not in the request at all", new JSONObject(worker.calls.get(3)).has("activation"));
+    }
+
+    @Test public void theActivationTheWorkerReportsReachesTheResult() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"text\":\"hi\",\"finish_reason\":\"stop\",\"activation_requested\":\"fp32\"}}";
+        assertEquals("fp32", engine(34).generate(params("x3", "gpu")).getString("activation_requested"));
+        worker.reply = "{\"ok\":true,\"data\":{\"text\":\"hi\",\"finish_reason\":\"stop\"}}";
+        assertEquals("default", engine(34).generate(params("x4", "gpu")).getString("activation_requested"));
+    }
+
+    @Test public void theContextTheCallerAsksForReachesTheWorkerAndTheResult() throws Exception {
+        LitertParams asked = LitertParams.fromArgs(new JSONObject()
+            .put("request_id", "c1").put("model", "m").put("backend", "cpu").put("prompt", "hi").put("context_tokens", 16384));
+        JSONObject out = engine(34).generate(asked);
+        assertEquals("the engine is opened with the context that was asked for", 16384,
+            new JSONObject(worker.calls.get(0)).getInt("context_tokens"));
+        assertEquals("the result reports the context that ran", 16384,
+            out.getJSONObject("params").getInt("context_tokens"));
+        LitertParams defaults = LitertParams.fromArgs(new JSONObject()
+            .put("request_id", "c2").put("model", "m").put("backend", "cpu").put("prompt", "hi"));
+        engine(34).generate(defaults);
+        assertEquals("the prudent default is unchanged", 4096,
+            new JSONObject(worker.calls.get(1)).getInt("context_tokens"));
+    }
+
+    // ---- cancel from the main process
+
+    @Test public void cancelWithTheWorkerNotStartedDoesNotStartIt() throws Exception {
+        worker.connected = false;
+        JSONObject out = engine(34).cancel("r1", false);
+        assertEquals(0, worker.calls.size());
+        assertFalse(out.getBoolean("cancelled"));
+        assertEquals("not_started", out.getString("state"));
+    }
+
+    @Test public void cancelOneAsksTheWorkerForThatRequest() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"cancelled\":true}}";
+        JSONObject out = engine(34).cancel("r1", false);
+        JSONObject sent = new JSONObject(worker.calls.get(0));
+        assertEquals("cancel", sent.getString("op"));
+        assertEquals("r1", sent.getString("request_id"));
+        assertFalse(sent.has("all"));
+        assertTrue(out.getBoolean("cancelled"));
+    }
+
+    @Test public void cancelAllAsksTheWorkerForWhateverRuns() throws Exception {
+        worker.reply = "{\"ok\":true,\"data\":{\"cancelled\":true,\"request_id\":\"orphan\"}}";
+        JSONObject out = engine(34).cancel(null, true);
+        JSONObject sent = new JSONObject(worker.calls.get(0));
+        assertTrue(sent.getBoolean("all"));
+        assertFalse(sent.has("request_id"));
+        assertEquals("orphan", out.getString("request_id"));
+    }
+
+    @Test public void aBadRequestIdOrNeitherNorBothNeverReachTheWorker() throws Exception {
+        for (Object[] bad : new Object[][] {{"a/b", false}, {"", false}, {null, false}, {"ok", true}}) {
+            try {
+                engine(34).cancel((String) bad[0], (Boolean) bad[1]);
+                fail("expected a rejection of " + java.util.Arrays.toString(bad));
+            } catch (LitertFailure f) {
+                assertEquals(LitertErrorCode.INVALID_ARGUMENT, f.code);
+            }
+        }
+        assertEquals(0, worker.calls.size());
+    }
+
+    @Test public void aDeadWorkerOnCancelIsTheTypedError() throws Exception {
+        worker.failure = new LitertFailure(LitertErrorCode.MODEL_WORKER_DIED, null, "worker", null, "died", null);
+        try {
+            engine(34).cancel("r1", false);
+            fail("expected MODEL_WORKER_DIED");
+        } catch (LitertFailure f) {
+            assertEquals(LitertErrorCode.MODEL_WORKER_DIED, f.code);
+        }
     }
 }

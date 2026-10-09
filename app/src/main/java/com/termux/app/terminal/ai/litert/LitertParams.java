@@ -15,8 +15,14 @@ public final class LitertParams {
     /** Fixed by the contract (the SDK needs one): reported back, not requested. */
     public static final double TOP_P = 1.0;
     public static final int SEED = 0;
-    /** The context the engine is opened with; the output limit is separate. */
-    public static final int CONTEXT_TOKENS = 4096;
+    /** The context the engine is opened with when the request does not say; the output limit is separate. */
+    public static final int DEFAULT_CONTEXT_TOKENS = 4096;
+    /** How long an engine may sit unused before the {@code :litert} process unloads it (5 minutes). */
+    public static final long DEFAULT_IDLE_UNLOAD_MS = 300_000L;
+    /** How often the idle check runs; an unload can be late by up to this much. */
+    public static final long IDLE_TICK_MS = 10_000L;
+    /** How often the :litert process checks that the caller of a running generation is still alive. */
+    public static final long CALLER_PING_MS = 3_000L;
     /** The request crosses a Binder transaction (about 1 MiB for the whole process): keep the prompt well inside it. */
     public static final int MAX_PROMPT_BYTES = 256 * 1024;
 
@@ -27,16 +33,22 @@ public final class LitertParams {
     public final LitertBackend backend;
     public final String prompt;
     public final int maxTokens;
+    /** The context the engine is opened with for this request; an engine per distinct context is kept by the runner. */
+    public final int contextTokens;
     public final double temperature;
     public final int topK;
+    /** The activation precision asked for; DEFAULT when the request does not say, and then nothing is sent on. */
+    public final LitertActivation activation;
 
     private LitertParams(String requestId, String model, LitertBackend backend, String prompt,
-                         int maxTokens, double temperature, int topK) {
+                         int maxTokens, int contextTokens, double temperature, int topK, LitertActivation activation) {
+        this.activation = activation;
         this.requestId = requestId;
         this.model = model;
         this.backend = backend;
         this.prompt = prompt;
         this.maxTokens = maxTokens;
+        this.contextTokens = contextTokens;
         this.temperature = temperature;
         this.topK = topK;
     }
@@ -58,6 +70,9 @@ public final class LitertParams {
             throw LitertFailure.invalid("prompt is larger than " + MAX_PROMPT_BYTES + " bytes");
         }
         int maxTokens = integer(args, "max_tokens", DEFAULT_MAX_TOKENS, 1, MAX_MAX_TOKENS);
+        // No upper cap: the maximum is what the model file accepts, and an engine that cannot
+        // open with the asked context fails with its own typed error (never a silent clamp).
+        int contextTokens = integer(args, "context_tokens", DEFAULT_CONTEXT_TOKENS, 1, Integer.MAX_VALUE);
         int topK = integer(args, "top_k", DEFAULT_TOP_K, 1, MAX_TOP_K);
         double temperature = DEFAULT_TEMPERATURE;
         if (args.has("temperature")) {
@@ -68,8 +83,12 @@ public final class LitertParams {
                 throw LitertFailure.invalid("temperature must be between 0 and " + MAX_TEMPERATURE);
             }
         }
-        return new LitertParams(requestId, model, backend, prompt.trim(), maxTokens, temperature, topK);
+        LitertActivation activation = LitertActivation.parse(string(args, "activation", false));
+        return new LitertParams(requestId, model, backend, prompt.trim(), maxTokens, contextTokens, temperature, topK, activation);
     }
+
+    /** Whether a text is a valid request id (1 to 64 characters of A-Z a-z 0-9 . _ -). */
+    static boolean validRequestId(String id) { return id != null && REQUEST_ID.matcher(id).matches(); }
 
     private static String string(JSONObject args, String name, boolean required) throws LitertFailure {
         Object raw = args.opt(name);

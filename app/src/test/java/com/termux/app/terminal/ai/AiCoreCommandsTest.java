@@ -104,6 +104,41 @@ public class AiCoreCommandsTest {
 
     // ------------------------------------------------------------ selection
     @Test
+    public void aModelNameSelectsTheSelectionThatReportsIt() throws Exception {
+        // FakeGenAiPort reports "model-<stage>/<pref>" for every pair.
+        generate("{\"prompt\":\"hi\",\"model\":\"model-preview/fast\"}");
+        assertEquals(new ModelSelection(ModelSelection.Stage.PREVIEW, ModelSelection.Preference.FAST),
+            port.generateSelections.get(0));
+        generate("{\"prompt\":\"hi\",\"model\":\"model-stable/full\"}");
+        assertEquals(ModelSelection.DEFAULT, port.generateSelections.get(1));
+    }
+
+    @Test
+    public void anUnknownModelNameIsATypedFailureAndNothingTouchesTheService() throws Exception {
+        try {
+            generate("{\"prompt\":\"hi\",\"model\":\"no-such\"}");
+            fail("expected the failure");
+        } catch (AiCoreFailure f) {
+            assertEquals("MODEL_NOT_FOUND", f.name);
+            assertEquals(AiCoreCommands.MODEL_NOT_FOUND_CODE, f.code);
+            assertTrue(f.getMessage(), f.getMessage().contains("aicore models"));
+        }
+        // Resolving a name reads the names the service reports, so those reads are expected;
+        // what must never happen is a generate, a download or a stream for an unknown name.
+        assertEquals("an unknown name never generates, downloads or streams", 0, port.modelCalls());
+        for (String call : port.calls) {
+            assertTrue("only name reads are allowed, saw: " + call, call.startsWith("baseModelName "));
+        }
+    }
+
+    @Test
+    public void aModelNameAndASelectionTogetherAreRejected() throws Exception {
+        rejects("aicore.generate",
+            "{\"prompt\":\"hi\",\"model\":\"model-stable/full\",\"stage\":\"stable\"}",
+            "model cannot be combined");
+    }
+
+    @Test
     public void stageAndPreferenceSelectTheClientAndUnknownValuesAreErrors() throws Exception {
         generate("{\"prompt\":\"hi\",\"stage\":\"preview\",\"preference\":\"fast\"}");
         assertEquals(new ModelSelection(ModelSelection.Stage.PREVIEW, ModelSelection.Preference.FAST), port.generateSelections.get(0));

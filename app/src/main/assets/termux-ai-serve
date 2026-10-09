@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""termux-ai serve — an OpenAI-compatible endpoint for the Termux AI app.
+
+usage: termux-ai-serve [--port N] [--socket PATH] [--backend cpu|gpu|npu]
+                       [--context N] [--tools strip|refuse]
+
+Binds 127.0.0.1 only, by design: the endpoint is for clients on this device.
+The app keeps its unix socket (ai.sock) and its JSON commands; this daemon is
+only a front end that translates /v1/models and /v1/chat/completions to those
+commands. The backend is chosen by the model name: a name starting with "nano"
+goes to aicore, a name starting with "gemma" goes to litert, and anything else
+is refused with a typed model_not_found error — never a guess.
+
+Tools (the coding-agent bridges send them on every request): with the default
+--tools strip they are removed from the request, the answer says so in the
+x-termux-ai-tools: stripped header and in the log; an empty tools array is
+left alone. --tools refuse answers a 400 with a clear message instead.
+Unknown request fields (store, stream_options, reasoning_effort, ...) are
+ignored, never a 400. Both max_completion_tokens and max_tokens are accepted.
+
+Models load on the first request and unload after the app's own idle timer
+(idle_unload_ms, 5 minutes by default); the daemon holds nothing open.
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+DEFAULT_PORT = 8888
+DEFAULT_SOCKET = "/data/data/com.termux/files/apps/com.termux/termux-ai/ai.sock"
+SOCKET_TIMEOUT_S = 300  # the worker's own generate deadline is 300 s
+
+# name prefix -> backend on ai.sock; first match wins
+BACKEND_BY_PREFIX = (("nano", "aicore"), ("gemma", "litert"))
+
+# The socket's typed failures as HTTP: BUSY and DEADLINE_EXCEEDED are 503 (the
+# caller's retry sees them), MODEL_NOT_FOUND / INVALID_ARGUMENT / CONTEXT_EXCEEDED
+# are 400, EMPTY_OUTPUT is not an error at all (an empty answer, finish stop).
+BUSY_CODES = {"BUSY", "DEADLINE_EXCEEDED"}
+BAD_REQUEST_CODES = {"MODEL_NOT_FOUND", "INVALID_ARGUMENT", "CONTEXT_EXCEEDED"}
+
+
+def estimate_tokens(text):
+    """No tokenizer on board: a chars/4 figure, honest about being an estimate."""
+    return max(1, (len(text) + 3) // 4) if text else 0
+
+
+def backend_status(error_name):
+    if error_name in BUSY_CODES:
+        return 503
+    if error_name in BAD_REQUEST_CODES:
+        return 400
+    return 502
+
+
+def backend_for(model):
+    name = (model or "").strip().lower()
+    for prefix, backend in BACKEND_BY_PREFIX:
+        if name.startswith(prefix):
+            return backend
+    return None
+
+
+class BackendError(Exception):
+    def __init__(self, status, code, message, headers=None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.headers = headers or {}
+
+
+class AppSocketClient:
+    """One newline-delimited JSON command per connection; the app's own protocol."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def call(self, cmd, args=None):
+        request = {"cmd": cmd}
+        if args is not None:
+            request["args"] = args
+        # Compact separators: the wire format is the same as the CLI's requests,
+        # so a logged line reads the same whichever side sent it.
+        line = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(SOCKET_TIMEOUT_S)
+        try:
+            client.connect(self.path)
+            client.sendall(line)
+            data = b""
+            while b"\n" not in data:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            client.close()
+        raw = data.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+        if not raw:
+            raise BackendError(502, "backend_unreachable", "the Termux AI app closed the connection without an answer")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise BackendError(502, "backend_bad_reply", "the Termux AI app sent a malformed reply")
+
+
+def models_list(app):
+    data = []
+    warnings = []
+    try:
+        reply = app.call("litert.models")
+        if reply.get("ok"):
+            for entry in (reply.get("data") or {}).get("models") or []:
+                if entry.get("id"):
+                    data.append({"id": entry["id"], "object": "model",
+                                 "owned_by": "termux-ai", "termux_backend": "litert"})
+        else:
+            warnings.append("litert.models failed: " + str(reply.get("error_name") or reply.get("error")))
+    except BackendError as e:
+        warnings.append("litert.models failed: " + e.code)
+    try:
+        reply = app.call("aicore.models")
+        if reply.get("ok"):
+            entries = (reply.get("data") or {}).get("models") or []
+            available = [e for e in entries if e.get("available")]
+            data.append({"id": "nano-3", "object": "model", "owned_by": "termux-ai",
+                         "termux_backend": "aicore", "available": bool(available),
+                         "selections": [{"stage": e.get("stage"), "preference": e.get("preference")}
+                                        for e in available]})
+        else:
+            warnings.append("aicore.models failed: " + str(reply.get("error_name") or reply.get("error")))
+    except BackendError as e:
+        warnings.append("aicore.models failed: " + e.code)
+    listing = {"object": "list", "data": data}
+    if warnings:
+        listing["warnings"] = warnings
+    return listing
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "termux-ai-serve"
+    # A cold load plus a generation can take ~20 s; the socket call itself has
+    # its own longer deadline. This timeout is for a client that goes silent.
+    timeout = 300
+
+    def log_message(self, fmt, *args):
+        sys.stdout.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
+        sys.stdout.flush()
+
+    def send_json(self, status, payload, extra_headers=None):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_error_json(self, status, code, message, extra_headers=None):
+        error_type = "invalid_request_error" if status == 400 else "api_error"
+        self.send_json(status, {"error": {"message": message, "type": error_type, "code": code}},
+                       extra_headers)
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/v1/models":
+            try:
+                self.send_json(200, models_list(self.server.app))
+            except BackendError as e:
+                self.send_error_json(e.status, e.code, e.message)
+        else:
+            self.send_error_json(404, "not_found", "GET serves /v1/models only")
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/v1/chat/completions":
+            self.send_error_json(404, "not_found", "POST serves /v1/chat/completions only")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_error_json(400, "invalid_json", "the request body is not valid JSON")
+            return
+        if not isinstance(body, dict):
+            self.send_error_json(400, "invalid_json", "the request body must be a JSON object")
+            return
+        try:
+            self.chat(body)
+        except BackendError as e:
+            self.send_error_json(e.status, e.code, e.message, e.headers)
+
+    def chat(self, body):
+        model = body.get("model")
+        backend = backend_for(model)
+        if backend is None:
+            known = ", ".join(prefix + "* -> " + name for prefix, name in BACKEND_BY_PREFIX)
+            raise BackendError(400, "model_not_found",
+                               "no backend is mapped for model %r (known names: %s)" % (model, known))
+        message_parts = []
+        extra_headers = {}
+        tools = body.get("tools")
+        if isinstance(tools, list) and tools:
+            if self.server.tools == "refuse":
+                raise BackendError(400, "tools_not_supported",
+                                   "this endpoint is configured to refuse tools "
+                                   "(--tools refuse); the backends behind it do not offer reliable tools, "
+                                   "so they are refused instead of being answered with an invented result")
+            extra_headers["x-termux-ai-tools"] = "stripped"
+            self.log_message("tools stripped: %d tool definition(s) dropped (the backends cannot honour them)", len(tools))
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise BackendError(400, "messages_required", "messages must be a non-empty array")
+        for message in messages:
+            if not isinstance(message, dict):
+                raise BackendError(400, "messages_required", "every message must be an object")
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                message_parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                        message_parts.append(part["text"])
+        prompt = "\n\n".join(message_parts)
+        if not prompt.strip():
+            raise BackendError(400, "messages_required", "the messages carry no text content")
+        args = {"request_id": "http-" + uuid.uuid4().hex[:12], "prompt": prompt}
+        max_tokens = body.get("max_completion_tokens", body.get("max_tokens"))
+        if max_tokens is not None:
+            if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+                raise BackendError(400, "invalid_max_tokens", "max_completion_tokens must be a positive integer")
+            args["max_tokens"] = max_tokens
+        temperature = body.get("temperature")
+        if temperature is not None:
+            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or temperature < 0 or temperature > 2:
+                raise BackendError(400, "invalid_temperature", "temperature must be a number between 0 and 2")
+            args["temperature"] = temperature
+        if backend == "litert":
+            args["model"] = model
+            chosen = body.get("termux_backend") or self.server.backend
+            if chosen not in ("cpu", "gpu", "npu"):
+                raise BackendError(400, "invalid_backend", "termux_backend must be cpu, gpu or npu")
+            args["backend"] = chosen
+            if self.server.context:
+                args["context_tokens"] = self.server.context
+        reply = self.server.app.call(backend + ".generate", args)
+        if not reply.get("ok"):
+            error_name = str(reply.get("error_name") or "backend_error")
+            if error_name == "EMPTY_OUTPUT":
+                # A typed empty answer is an empty completion, not a transport failure.
+                data, text, finish, thinking = {}, "", "stop", ""
+            else:
+                status = backend_status(error_name)
+                headers = {"Retry-After": "5"} if status == 503 else None
+                raise BackendError(status, error_name,
+                                   str(reply.get("error") or "the backend refused the request"), headers)
+        else:
+            data = reply.get("data") or {}
+            text = data.get("text") or ""
+            finish = "length" if data.get("finish_reason") == "length" else "stop"
+            thinking = data.get("thinking") or ""
+        created = int(time.time())
+        completion_id = "chatcmpl-" + uuid.uuid4().hex[:12]
+        usage = {"prompt_tokens": estimate_tokens(prompt), "completion_tokens": estimate_tokens(text),
+                 "total_tokens": estimate_tokens(prompt) + estimate_tokens(text)}
+        if body.get("stream"):
+            self.send_sse(completion_id, created, model, text, finish, thinking, usage,
+                          include_usage=bool((body.get("stream_options") or {}).get("include_usage")),
+                          extra_headers=extra_headers)
+        else:
+            message = {"role": "assistant", "content": text}
+            if thinking:
+                message["reasoning_content"] = thinking
+            self.send_json(200, {
+                "id": completion_id, "object": "chat.completion", "created": created,
+                "model": model,
+                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                "usage": usage,
+            }, extra_headers)
+
+    def send_sse(self, completion_id, created, model, text, finish, thinking, usage,
+                 include_usage=False, extra_headers=None):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+
+        def chunk(delta, finish_reason=None, final_usage=None):
+            payload = {"id": completion_id, "object": "chat.completion.chunk", "created": created,
+                       "model": model,
+                       "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+            if final_usage is not None:
+                payload["usage"] = final_usage
+            self.wfile.write(b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n")
+
+        chunk({"role": "assistant"})
+        if thinking:
+            chunk({"reasoning_content": thinking})
+        if text:
+            chunk({"content": text})
+        # The final chunk always carries a non-null finish_reason: a stream that
+        # ends without one is an error for the streaming clients.
+        chunk({}, finish, usage if include_usage else None)
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="OpenAI-compatible endpoint for the Termux AI app (loopback only)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="TCP port to bind on 127.0.0.1 (default %(default)s)")
+    parser.add_argument("--socket", default=os.environ.get("TERMUX_AI_SOCKET", DEFAULT_SOCKET),
+                        help="the app's ai.sock (default: the one the CLI uses)")
+    parser.add_argument("--backend", choices=("cpu", "gpu", "npu"), default="gpu",
+                        help="litert backend used for chat completions (default %(default)s)")
+    parser.add_argument("--context", type=int, default=None,
+                        help="context_tokens sent with every litert request "
+                             "(the model's own maximum is what the app accepts; default: the app's 4096)")
+    parser.add_argument("--tools", choices=("strip", "refuse"), default="strip",
+                        help="what to do with a request that carries tools: strip them (default) "
+                             "or refuse with a 400 (default %(default)s)")
+    args = parser.parse_args()
+
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.daemon_threads = True
+    server.app = AppSocketClient(args.socket)
+    server.backend = args.backend
+    server.context = args.context
+    server.tools = args.tools
+    print("termux-ai serve: http://127.0.0.1:%d -> %s (litert backend: %s, context: %s, tools: %s)"
+          % (args.port, args.socket, args.backend, args.context or "app default", args.tools), flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

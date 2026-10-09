@@ -1,5 +1,6 @@
 package com.termux.app.terminal.ai.litert
 
+import com.google.ai.edge.litertlm.ActivationDataType
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
@@ -19,12 +20,18 @@ class LiteRtLmRuntime(
     private val cacheDir: String,
 ) : LitertRuntime {
 
-    override fun load(modelPath: String, backend: LitertBackend, contextTokens: Int): LitertRuntime.Loaded {
+    override fun load(modelPath: String, backend: LitertBackend, contextTokens: Int, activation: LitertActivation): LitertRuntime.Loaded {
         val config = EngineConfig(
             modelPath = modelPath,
             backend = sdkBackend(backend),
             maxNumTokens = contextTokens,
             cacheDir = cacheDir,
+            // null leaves the choice to the SDK (fp16 on GPU): only an explicit request changes the precision.
+            activationDataType = when (activation) {
+                LitertActivation.DEFAULT -> null
+                LitertActivation.FP16 -> ActivationDataType.FLOAT16
+                LitertActivation.FP32 -> ActivationDataType.FLOAT32
+            },
         )
         val engine = Engine(config)
         try {
@@ -76,7 +83,7 @@ class LiteRtLmRuntime(
                 if (token.isCancelled) throw cancelledFailure()
                 val reply = conversation.sendMessage(prompt)
                 if (token.isCancelled) throw cancelledFailure()
-                output = LitertRuntime.Output(text(reply), "other")
+                output = LitertRuntime.Output(text(reply), "other", thinking(reply), reply.toolCalls.size)
             } catch (e: LitertFailure) {
                 problem = e
             } catch (e: Exception) {
@@ -96,8 +103,9 @@ class LiteRtLmRuntime(
 
         override fun evidence(): String = mappedExecutorLibraries()
 
+        // A close that fails is thrown, not swallowed: the runner records it, so a leak is something we can see.
         override fun close() {
-            runCatching { engine.close() }
+            engine.close()
         }
 
         private fun cancelledFailure() =
@@ -110,6 +118,10 @@ class LiteRtLmRuntime(
         /** The reply text: every text part, in order. Thinking channels are not part of the answer. */
         fun text(message: Message): String =
             message.contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }
+
+        /** What the model wrote on its channels (its thinking), one channel per line; empty when there is none. */
+        fun thinking(message: Message): String =
+            message.channels.values.filter { it.isNotEmpty() }.joinToString("\n")
 
         /** The SDK reports no limit error of its own: the wording is the only signal, so it is matched narrowly. */
         fun classify(e: Exception): LitertErrorCode {

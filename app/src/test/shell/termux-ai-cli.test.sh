@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="${TERMUX_AI_CLI:-$HERE/../../main/assets/termux-ai}"
 STUB="$HERE/stub_socket_server.py"
 WORK="$(mktemp -d)"
+ROUTES="$WORK/routes.jsonl"
 STUB_PID=""
 PASS=0
 FAIL=0
@@ -335,6 +336,73 @@ start_stub reply "$WORK/resp"
 run_cli aicore info
 [ "$RC" -ne 0 ] && grep -q '"ok":false' "$WORK/out"; check "info ok:false gives rc != 0 and prints the JSON" $?
 
+# ------------------------------------------------- aicore L3: model, foreground, download
+start_stub echo
+: > "$WORK/requests.log"
+run_cli aicore generate --model gemini-nano hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+args = req["args"]
+assert req["cmd"] == "aicore.generate", req
+assert args.get("model") == "gemini-nano", args
+assert args["prompt"] == "hello", args
+PY
+check "aicore generate --model reaches the request as model" $?
+: > "$WORK/requests.log"
+run_cli aicore generate --model "bad name" hello
+check "aicore generate --model with spaces is a usage error (rc 2), nothing sent" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+
+printf '%s\n' '{"ok":false,"error":"the app is not in the foreground","error_name":"FOREGROUND_REQUIRED","error_code":2001,"remedy":"open the Termux AI app, or grant Termux the Display over other apps permission"}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli aicore generate hello
+check "FOREGROUND_REQUIRED exits 5" "$([ "$RC" -eq 5 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q "over other apps" "$WORK/err"; check "FOREGROUND_REQUIRED prints the remedy" $? "$(cat "$WORK/err")"
+
+printf '%s\n' '{"ok":false,"error":"background use is blocked by the engine","error_name":"BACKGROUND_USE_BLOCKED","error_code":30,"remedy":"open the Termux AI app so it is in the foreground"}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli aicore generate hello
+check "BACKGROUND_USE_BLOCKED exits 6" "$([ "$RC" -eq 6 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q "foreground" "$WORK/err"; check "BACKGROUND_USE_BLOCKED prints the remedy" $? "$(cat "$WORK/err")"
+
+routes_aicore() {
+  cat > "$ROUTES" <<'JSONEOF'
+aicore.download {"ok":true,"data":{"started":true,"stage":"stable","preference":"full"}}
+aicore.generate {"ok":true,"data":{"text":"eco","finish_reason":"stop"}}
+JSONEOF
+}
+routes_aicore
+start_stub routes "$ROUTES"
+: > "$WORK/requests.log"
+run_cli aicore download
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req["cmd"] == "aicore.download", req
+assert req["args"].get("wait") is False, req
+PY
+check "aicore download asks for a non-blocking download (wait false)" $?
+[ "$RC" -eq 0 ]; check "aicore download returns at once with rc 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)" "rc=$RC out=$(cat "$WORK/out")"
+: > "$WORK/requests.log"
+run_cli aicore download --wait
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args.get("wait") is True, args
+PY
+check "aicore download --wait asks for the blocking download" $?
+: > "$WORK/requests.log"
+run_cli aicore download --status
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req["cmd"] == "aicore.download", req
+assert req["args"].get("status_only") is True, req
+PY
+check "aicore download --status asks for the status only" $?
+run_cli aicore download --wait --status
+check "aicore download --wait --status together is a usage error (rc 2)" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
+
 
 # ------------------------------------------------------------------- litert verbs
 lrequests() { grep -c '"cmd":"litert.generate"' "$WORK/requests.log"; }
@@ -354,6 +422,20 @@ check "litert generate sends the backend, model, request id and every flag" $?
 check "litert generate prints the answer, rc 0, no broadcast" $?
 
 : > "$WORK/requests.log"
+run_cli litert generate --backend cpu --model m --request-id ctx1 --context 8192 hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args.get("context_tokens") == 8192, args
+PY
+check "litert generate --context reaches the request as context_tokens" $?
+for badctx in 0 -4096 big 40.5; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert generate --backend cpu --model m --context $badctx hello
+  check "litert generate --context '$badctx' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+done
+: > "$WORK/requests.log"
 run_cli litert generate --backend cpu --model m hello
 python3 - "$WORK/requests.log" <<'PY'
 import json, re, sys
@@ -364,17 +446,177 @@ assert "max_tokens" not in args and "temperature" not in args and "top_k" not in
 PY
 check "without flags the request has a generated request id and no parameters" $?
 
-for badflags in "--model m" "--backend CPU --model m" "--backend tpu --model m" "--backend --model m" "--backend cpu" "--backend cpu --model ../x" "--backend cpu --model a/b" "--backend cpu --model .hidden" "--backend cpu --model m --request-id a/b" "--backend cpu --model m --stage stable" "--backend cpu --model m --preference fast" "--backend cpu --model m --max-tokens 0" "--backend cpu --model m --temperature 1.5" "--backend cpu --model m --top-k 0"; do
+start_stub echo
+: > "$WORK/requests.log"
+run_cli litert generate --backend gpu --model m --activation fp32 hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["activation"] == "fp32" and args["backend"] == "gpu", args
+PY
+check "litert generate --activation fp32 sends the precision" $?
+: > "$WORK/requests.log"
+run_cli litert generate --backend gpu --model m hello
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert "activation" not in args, args
+PY
+check "without --activation the request carries no activation at all" $?
+for badact in "--activation fp8" "--activation FP32" "--activation default" "--activation" "--activation int8"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert generate --backend gpu --model m $badact hello
+  check "litert generate '$badact' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q -- "--activation fp16|fp32" "$WORK/out"; check "--help lists --activation" $?
+grep -q "unasked activation is fp32" "$WORK/out"; check "--help says the gpu activation default is fp32" $?
+
+for badflags in "--model m" "--backend CPU --model m" "--backend tpu --model m" "--backend --model m" "--backend cpu" "--backend cpu --model ../x" "--backend cpu --model a//b" "--backend cpu --model /abs" "--backend cpu --model a/../b" "--backend cpu --model a/.h" "--backend cpu --model a/b/c/d" "--backend cpu --model .hidden" "--backend cpu --model m --request-id a/b" "--backend cpu --model m --stage stable" "--backend cpu --model m --preference fast" "--backend cpu --model m --max-tokens 0" "--backend cpu --model m --temperature 1.5" "--backend cpu --model m --top-k 0"; do
   : > "$WORK/requests.log"
   # shellcheck disable=SC2086
   run_cli litert generate $badflags hello
   check "litert generate '$badflags' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ "$(lrequests)" -eq 0 ] && [ ! -s "$WORK/out" ] && echo 0 || echo 1)" "rc=$RC requests=$(lrequests)"
 done
 
+start_stub echo
+for id in qwen/q3 qwen/small/q0; do
+  : > "$WORK/requests.log"
+  run_cli litert generate --backend cpu --model "$id" hello
+  python3 - "$WORK/requests.log" "$id" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["model"] == sys.argv[2], args
+PY
+  check "litert generate accepts the folder model id $id and sends it whole" $?
+done
+
 : > "$WORK/requests.log"
 run_cli litert info
 grep -q '"cmd":"litert.info"' "$WORK/requests.log" && [ "$(broadcasts)" -eq 0 ]
 check "litert info goes through the socket" $?
+for verb in unload restart; do
+  printf '%s\n' '{"ok":true,"data":{"unloaded":false,"via":"none"}}' > "$WORK/resp"
+  start_stub reply "$WORK/resp"
+  : > "$WORK/requests.log"
+  run_cli litert $verb
+  python3 - "$WORK/requests.log" "$verb" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert." + sys.argv[2], "args": {}}, req
+PY
+  check "litert $verb sends litert.$verb with no arguments through the socket" $?
+  [ "$RC" -eq 0 ] && [ "$(broadcasts)" -eq 0 ]
+  check "litert $verb: rc 0, no broadcast" $?
+  run_cli litert $verb --force
+  check "litert $verb takes no options (usage rc 2)" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert unload" "$WORK/out" && grep -q "termux-ai litert restart" "$WORK/out"; check "--help lists litert unload and restart" $?
+
+printf '%s\n' '{"ok":true,"data":{"idle_unload_ms":300000,"source":"default"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert config
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.config", "args": {}}, req
+PY
+check "litert config asks for the settings and sets nothing" $?
+: > "$WORK/requests.log"
+run_cli litert config --set idle_unload_ms=60000
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.config", "args": {"set": {"idle_unload_ms": 60000}}}, req
+PY
+check "litert config --set idle_unload_ms=N sends the number" $?
+for bad in "--set idle_unload_ms=abc" "--set idle_unload_ms=" "--set idle_unload_ms=-1" "--set foo=1" "--set" "--set idle_unload_ms=5 --set idle_unload_ms=6" "--force"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  run_cli litert config $bad
+  check "litert config '$bad' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert config" "$WORK/out"; check "--help lists litert config" $?
+
+printf '%s\n' '{"ok":true,"data":{"cancelled":true,"request_id":"r1"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert cancel --request-id r1
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.cancel", "args": {"request_id": "r1"}}, req
+PY
+check "litert cancel --request-id sends that request id" $?
+[ "$RC" -eq 0 ] && [ "$(broadcasts)" -eq 0 ]; check "litert cancel: rc 0, no broadcast" $?
+: > "$WORK/requests.log"
+run_cli litert cancel --all
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req == {"cmd": "litert.cancel", "args": {"all": True}}, req
+PY
+check "litert cancel --all asks for whatever runs" $?
+for bad in "" "--all --request-id r1" "--request-id" "--request-id a/b" "--request-id ''" "--all extra" "--force" "r1"; do
+  : > "$WORK/requests.log"
+  # shellcheck disable=SC2086
+  eval run_cli litert cancel $bad
+  check "litert cancel '$bad' is a usage error (rc 2) and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+done
+run_cli --help
+grep -q "termux-ai litert cancel" "$WORK/out"; check "--help lists litert cancel" $?
+stop_stub; rm -f "$WORK/ai.sock"
+run_cli litert cancel --all
+check "litert cancel: socket absent is rc 3, nothing is broadcast" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
+start_stub reply "$WORK/resp"
+
+# A CLI that is interrupted while its generation runs asks for that generation to be cancelled: nobody waits for it.
+signal_run() { # signal_run SIGNAL: a generate in its own process group, hung stub, then the signal to the group
+  start_stub hang
+  : > "$WORK/requests.log"
+  PATH="$WORK/bin:$PATH" TERMUX_AI_SOCKET="$WORK/ai.sock" python3 -c 'import os,sys,signal; os.setsid(); signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("bash", ["bash"] + sys.argv[1:])' "$CLI" litert generate --backend cpu --model m --request-id sig1 hello \
+    > "$WORK/out" 2> "$WORK/err" < /dev/null &
+  local pid=$! i
+  for i in $(seq 1 100); do grep -q '"cmd":"litert.generate"' "$WORK/requests.log" && break; sleep 0.05; done
+  sleep 0.2
+  kill "-$1" -- "-$pid" 2>/dev/null
+  wait "$pid"; RC=$?
+  sleep 0.2
+}
+signal_run INT
+check "an interrupted generate (SIGINT) exits 130" "$([ "$RC" -eq 130 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q '"cmd":"litert.cancel","args":{"request_id":"sig1"}' "$WORK/requests.log"; check "SIGINT: the CLI asks to cancel its own request id" $? "$(cat "$WORK/requests.log")"
+signal_run TERM
+check "a terminated generate (SIGTERM) exits 143" "$([ "$RC" -eq 143 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q '"cmd":"litert.cancel","args":{"request_id":"sig1"}' "$WORK/requests.log"; check "SIGTERM: the CLI asks to cancel its own request id" $?
+# The same interrupt delivered to the bash process alone (not the group): the trap must fire at once, while
+# nc is still connected — not after the exchange ends on its own. RC 999 = the bash was still alive after 6 s.
+start_stub hang
+: > "$WORK/requests.log"
+PATH="$WORK/bin:$PATH" TERMUX_AI_SOCKET="$WORK/ai.sock" python3 -c 'import os,sys,signal; os.setsid(); signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("bash", ["bash"] + sys.argv[1:])' "$CLI" litert generate --backend cpu --model m --request-id sig2 hello \
+  > "$WORK/out" 2> "$WORK/err" < /dev/null &
+pid=$!
+for i in $(seq 1 100); do grep -q '"cmd":"litert.generate"' "$WORK/requests.log" && break; sleep 0.05; done
+sleep 0.2
+kill -INT "$pid" 2>/dev/null
+RC=999
+for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; RC=$?; fi
+kill -TERM -- "-$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+sleep 0.2
+check "a SIGINT to the bash alone exits 130 without waiting for nc" "$([ "$RC" -eq 130 ] && echo 0 || echo 1)" "rc=$RC"
+grep -q '"cmd":"litert.cancel","args":{"request_id":"sig2"}' "$WORK/requests.log"; check "SIGINT to the bash alone: the CLI asks to cancel its own request id" $? "$(cat "$WORK/requests.log")"
+printf '%s\n' '{"ok":true,"data":{"text":"done","finish_reason":"stop"}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+: > "$WORK/requests.log"
+run_cli litert generate --backend cpu --model m --request-id fine hello
+check "a generate that finishes sends no cancel" "$([ "$RC" -eq 0 ] && ! grep -q 'litert.cancel' "$WORK/requests.log" && echo 0 || echo 1)" "rc=$RC"
+
 run_cli litert models extra
 check "litert models takes no options" "$([ "$RC" -eq 2 ] && echo 0 || echo 1)" "rc=$RC"
 run_cli litert download
@@ -397,6 +639,308 @@ run_cli litert generate --backend cpu --model m hello
 check "litert: socket absent, generate is rc 3 and does not broadcast" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC"
 run_cli litert info
 check "litert: socket absent, info is rc 3 too (there is no broadcast path)" "$([ "$RC" -eq 3 ] && [ "$(broadcasts)" -eq 0 ] && echo 0 || echo 1)" "rc=$RC broadcasts=$(broadcasts)"
+
+# ------------------------------------------------- serve: OpenAI-compatible endpoint
+run_cli --help
+grep -q "termux-ai serve" "$WORK/out"; check "--help lists serve" $?
+
+SRV_PORT=18123
+SRV_PID=""
+srv_stop() {
+  if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; SRV_PID=""; fi
+}
+srv_wait() {
+  local i
+  for i in $(seq 1 100); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$SRV_PORT") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
+    sleep 0.05
+  done
+  return 1
+}
+srv_start() { # srv_start: an app-socket stub must already be running
+  TERMUX_AI_SOCKET="$WORK/ai.sock" bash "$CLI" serve --port "$SRV_PORT" > "$WORK/serve.log" 2>&1 &
+  SRV_PID=$!
+  if srv_wait; then return 0; fi
+  bad "serve did not open 127.0.0.1:$SRV_PORT" "$(tail -3 "$WORK/serve.log")"
+  return 1
+}
+srv_http() { # srv_http OUT METHOD PATH [BODY]
+  local out="$1" method="$2" path="$3" body="${4:-}" len=0
+  [ -n "$body" ] && len=$(printf '%s' "$body" | wc -c)
+  {
+    printf '%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' "$method" "$path" "$len"
+    [ -n "$body" ] && printf '%s' "$body"
+    sleep 0.4
+  } | nc 127.0.0.1 "$SRV_PORT" > "$out" 2>/dev/null
+}
+srv_body() { # srv_body HTTPFILE -> header-free body on stdout
+  python3 -c 'import sys; d=open(sys.argv[1],"rb").read(); i=d.find(b"\r\n\r\n"); sys.stdout.write(d[i+4:].decode("utf-8","replace"))' "$1"
+}
+routes_models() {
+  cat > "$ROUTES" <<'JSONEOF'
+litert.models {"ok":true,"data":{"directory":"/d","directory_exists":true,"models":[{"id":"gemma-4-e2b","path":"/d/gemma-4-e2b.litertlm","size_bytes":9}],"problems":[]}}
+aicore.models {"ok":true,"data":{"models":[{"stage":"stable","preference":"full","status":"AVAILABLE","available":true,"base_model_name":"gemini-nano-3"}],"note":""}}
+JSONEOF
+}
+routes_gen() {
+  cat > "$ROUTES" <<'JSONEOF'
+litert.generate {"ok":true,"data":{"text":"ciao dal litert","finish_reason":"stop","backend_requested":"cpu","backend_effective":"cpu","backend_verified":true,"engine_reused":false}}
+aicore.generate {"ok":true,"data":{"text":"ciao dal tpu","finish_reason":"stop"}}
+JSONEOF
+}
+
+routes_models
+start_stub routes "$ROUTES"
+srv_start
+srv_http "$WORK/http.out" GET /v1/models
+check "serve: /v1/models answers 200" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" > "$WORK/body.json"
+python3 - "$WORK/body.json" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert body["object"] == "list", body
+ids = {m["id"]: m for m in body["data"]}
+assert "gemma-4-e2b" in ids and ids["gemma-4-e2b"].get("termux_backend") == "litert", ids
+assert "nano-3" in ids and ids["nano-3"].get("termux_backend") == "aicore", ids
+PY
+check "serve: /v1/models maps gemma to litert and nano to aicore" $?
+srv_stop
+
+routes_gen
+start_stub routes "$ROUTES"
+srv_start
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"system","content":"sei a bordo"},{"role":"user","content":"saluta"}],"max_completion_tokens":128}'
+check "serve: chat completions answers 200" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" > "$WORK/body.json"
+python3 - "$WORK/body.json" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert body["object"] == "chat.completion", body
+choice = body["choices"][0]
+assert choice["message"]["role"] == "assistant", choice
+assert choice["message"]["content"] == "ciao dal litert", choice
+assert choice["finish_reason"] == "stop", choice
+assert body["model"] == "gemma-4-e2b", body
+PY
+check "serve: non-stream chat answers the OpenAI shape with the answer text" $?
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys, re
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+args = req["args"]
+assert req["cmd"] == "litert.generate", req
+assert args["model"] == "gemma-4-e2b", args
+assert "sei a bordo" in args["prompt"] and "saluta" in args["prompt"], args
+assert args["max_tokens"] == 128, args
+assert re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args["request_id"]), args
+PY
+check "serve: the chat reaches ai.sock as litert.generate (prompt joined, max_completion_tokens as max_tokens)" $?
+
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","stream":true,"messages":[{"role":"user","content":"saluta"}]}'
+grep -q '^HTTP/1.1 200' "$WORK/http.out" && grep -qi '^content-type: text/event-stream' "$WORK/http.out"
+check "serve: a stream request answers 200 text/event-stream" $?
+srv_body "$WORK/http.out" > "$WORK/body.json"
+python3 - "$WORK/body.json" <<'PY'
+import json, sys
+chunks = []
+done = False
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line == "data: [DONE]":
+        done = True
+    elif line.startswith("data: "):
+        chunks.append(json.loads(line[6:]))
+assert done, "no data: [DONE] seen"
+assert chunks[0]["choices"][0]["delta"].get("role") == "assistant", chunks
+text = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+assert text == "ciao dal litert", text
+assert chunks[-1]["choices"][0]["finish_reason"] == "stop", chunks
+PY
+check "serve: the SSE chunks carry the whole answer and end with a finish_reason" $?
+
+: > "$WORK/requests.log"
+# Tools: the coding-agent bridges send them on every request, so the default is to
+# strip them (said in the x-termux-ai-tools header and the log), refuse is opt-in.
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":{"name":"f","parameters":{}}}],"tool_choice":"auto"}'
+check "serve: tools are stripped by default (200, x-termux-ai-tools: stripped)" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && grep -qi '^x-termux-ai-tools: stripped' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+[ "$(lrequests)" -eq 1 ]; check "serve: a stripped tools request still reaches ai.sock" $?
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}],"tools":[]}'
+grep -q '^HTTP/1.1 200' "$WORK/http.out" && ! grep -qi '^x-termux-ai-tools:' "$WORK/http.out"
+check "serve: an empty tools array is left alone (200, no header)" $?
+srv_stop
+SRV_PORT=18124
+TERMUX_AI_SOCKET="$WORK/ai.sock" bash "$CLI" serve --port "$SRV_PORT" --tools refuse > "$WORK/serve2.log" 2>&1 &
+SRV_PID=$!
+if ! srv_wait; then bad "serve (refuse) did not open" "$(tail -3 "$WORK/serve2.log")"; fi
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":{"name":"f"}}]}'
+check "serve: --tools refuse answers 400 tools_not_supported" "$(grep -q '^HTTP/1.1 400' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["error"]["code"]=="tools_not_supported", b'
+check "serve: the tools refusal names tools_not_supported" $?
+srv_stop
+SRV_PORT=18123
+start_stub routes "$ROUTES"
+srv_start
+
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"nano-3","messages":[{"role":"user","content":"saluta"}]}'
+grep -q '^HTTP/1.1 200' "$WORK/http.out"; check "serve: nano-3 answers 200" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+req = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert req["cmd"] == "aicore.generate", req
+assert req["args"]["prompt"] == "saluta", req
+PY
+check "serve: nano-3 is translated to aicore.generate" $?
+
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"zzz-other","messages":[{"role":"user","content":"x"}]}'
+grep -q '^HTTP/1.1 400' "$WORK/http.out"; check "serve: an unmapped model is a 400" "$(grep -q '^HTTP/1.1 400' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["error"]["code"]=="model_not_found", b'
+check "serve: the unmapped refusal names model_not_found" $?
+
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b"}'
+grep -q '^HTTP/1.1 400' "$WORK/http.out"; check "serve: chat without messages is a 400" $?
+
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}],"max_tokens":77}'
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["max_tokens"] == 77, args
+PY
+check "serve: legacy max_tokens reaches the request too" $?
+
+# Unknown fields never 400; the developer role and text parts flatten into the prompt.
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","store":false,"reasoning_effort":"low","prompt_cache_key":"k","messages":[{"role":"developer","content":"regole di bordo"},{"role":"user","content":[{"type":"text","text":"parte1"},{"type":"text","text":"parte2"}]}]}'
+grep -q '^HTTP/1.1 200' "$WORK/http.out"; check "serve: unknown fields, developer role and text parts are accepted" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert "regole di bordo" in args["prompt"], args
+assert "parte1" in args["prompt"] and "parte2" in args["prompt"], args
+PY
+check "serve: developer content and text parts flatten into the prompt" $?
+
+# stream_options.include_usage: the last chunk (before [DONE]) carries an estimated usage.
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","stream":true,"stream_options":{"include_usage":true},"store":false,"messages":[{"role":"user","content":"saluta"}]}'
+grep -q '^HTTP/1.1 200' "$WORK/http.out"; check "serve: stream with unknown fields answers 200" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" > "$WORK/body.json"
+python3 - "$WORK/body.json" <<'PY'
+import json, sys
+chunks, done = [], False
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line == "data: [DONE]":
+        done = True
+    elif line.startswith("data: "):
+        chunks.append(json.loads(line[6:]))
+assert done, "no [DONE]"
+last = chunks[-1]
+assert last["choices"][0]["finish_reason"] is not None, last
+assert last.get("usage", {}).get("prompt_tokens", 0) > 0, last
+PY
+check "serve: the last chunk has a finish_reason and the estimated usage" $?
+
+# Typed backend failures, as the socket reports them.
+routes_errors() {
+  cat > "$ROUTES" <<'JSONEOF'
+litert.generate {"ok":false,"error":"request x is still running","error_name":"BUSY","error_code":1011}
+aicore.generate {"ok":false,"error":"request x is still running","error_name":"BUSY","error_code":1011}
+JSONEOF
+}
+routes_errors
+stop_stub
+start_stub routes "$ROUTES"
+srv_stop
+srv_start
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}]}'
+check "serve: BUSY is a 503 with Retry-After" "$(grep -q '^HTTP/1.1 503' "$WORK/http.out" && grep -qi '^retry-after:' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+routes_context() {
+  cat > "$ROUTES" <<'JSONEOF'
+litert.generate {"ok":false,"error":"prompt exceeds the 4096 token context of this model","error_name":"CONTEXT_EXCEEDED","error_code":1012}
+JSONEOF
+}
+routes_context
+stop_stub
+start_stub routes "$ROUTES"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}]}'
+check "serve: CONTEXT_EXCEEDED is a 400" "$(grep -q '^HTTP/1.1 400' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+srv_body "$WORK/http.out" | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["error"]["code"]=="CONTEXT_EXCEEDED" and "4096" in b["error"]["message"], b'
+check "serve: CONTEXT_EXCEEDED names the code and the context in the message" $?
+routes_empty() {
+  cat > "$ROUTES" <<'JSONEOF'
+litert.generate {"ok":false,"error":"no answer text","error_name":"EMPTY_OUTPUT","error_code":1019}
+JSONEOF
+}
+routes_empty
+stop_stub
+start_stub routes "$ROUTES"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}]}'
+srv_body "$WORK/http.out" > "$WORK/body.json"
+python3 - "$WORK/body.json" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert body["choices"][0]["message"]["content"] == "", body
+assert body["choices"][0]["finish_reason"] == "stop", body
+PY
+check "serve: EMPTY_OUTPUT is an empty completion with finish stop, not a 5xx" $?
+
+# The serve-level context and backend reach the litert request.
+srv_stop
+stop_stub
+routes_gen
+start_stub routes "$ROUTES"
+SRV_PORT=18125
+TERMUX_AI_SOCKET="$WORK/ai.sock" bash "$CLI" serve --port "$SRV_PORT" --context 8192 --backend cpu > "$WORK/serve3.log" 2>&1 &
+SRV_PID=$!
+if ! srv_wait; then bad "serve (context) did not open" "$(tail -3 "$WORK/serve3.log")"; fi
+: > "$WORK/requests.log"
+srv_http "$WORK/http.out" POST /v1/chat/completions '{"model":"gemma-4-e2b","messages":[{"role":"user","content":"x"}]}'
+check "serve (context): chat answers 200" "$(grep -q '^HTTP/1.1 200' "$WORK/http.out" && echo 0 || echo 1)" "$(head -1 "$WORK/http.out" | tr -d '\r')"
+python3 - "$WORK/requests.log" <<'PY'
+import json, sys
+args = json.loads(open(sys.argv[1]).read().splitlines()[-1])["args"]
+assert args["context_tokens"] == 8192, args
+assert args["backend"] == "cpu", args
+PY
+check "serve: --context and --backend reach the litert request" $?
+srv_stop
+SRV_PORT=18123
+
+SRV_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [ -n "$SRV_IP" ]; then
+  timeout 2 nc "$SRV_IP" "$SRV_PORT" < /dev/null > /dev/null 2>&1
+  [ $? -ne 0 ]; check "serve: the endpoint is not reachable on $SRV_IP (loopback only)" $?
+fi
+srv_stop
+
+# ------------------------------------------------------------- missing nc (6b)
+# A PATH with every tool of the host except nc: the socket is there, the tool to talk to it is not.
+mkdir -p "$WORK/nonc"
+for tool in /usr/bin/* /bin/*; do
+  case "$(basename "$tool")" in nc|ncat|netcat|nc.openbsd|nc.traditional) continue ;; esac
+  [ -e "$WORK/nonc/$(basename "$tool")" ] || ln -s "$tool" "$WORK/nonc/$(basename "$tool")" 2>/dev/null
+done
+run_cli_nonc() {
+  PATH="$WORK/nonc" TERMUX_AI_SOCKET="$WORK/ai.sock" "$BASH" "$CLI" "$@" > "$WORK/out" 2> "$WORK/err" < /dev/null
+  RC=$?
+}
+PATH="$WORK/nonc" command -v nc >/dev/null 2>&1; check "the no-nc PATH really has no nc" "$([ $? -ne 0 ] && echo 0 || echo 1)"
+
+printf '%s\n' '{"ok":true,"data":{"models":[]}}' > "$WORK/resp"
+start_stub reply "$WORK/resp"
+run_cli_nonc litert models
+check "missing nc: rc 2 (not 3: the socket is there), nothing sent" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+grep -q "pkg install netcat-openbsd" "$WORK/out"
+check "missing nc: the message names the remedy" $? "$(cat "$WORK/out")"
+run_cli_nonc litert generate --backend cpu --model m hello
+check "missing nc: generate is rc 2 too and sends nothing" "$([ "$RC" -eq 2 ] && [ ! -s "$WORK/requests.log" ] && echo 0 || echo 1)" "rc=$RC"
+run_cli --help
+grep -q "netcat-openbsd" "$WORK/out"; check "--help lists nc among the requirements" $?
+stop_stub; rm -f "$WORK/ai.sock"
+run_cli_nonc litert info
+check "regression guard: no socket and no nc is still rc 3 (the socket is checked first)" "$([ "$RC" -eq 3 ] && echo 0 || echo 1)" "rc=$RC"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

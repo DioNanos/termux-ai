@@ -19,6 +19,12 @@ final class FakeRuntime implements LitertRuntime {
     CountDownLatch inEvidence;       // counted down when evidence() is asked
     CountDownLatch releaseEvidence;  // evidence() waits for it when set
     String evidence = "";
+    /** What the next generations answer, think and ask for. */
+    String answer = "answer";
+    String thinking = "";
+    int toolCalls;
+    /** When set, closing an engine throws it (after being logged): a close that did not complete. */
+    RuntimeException closeFailure;
     /** True while the native stop of a generation has been triggered and that generation is still running. */
     volatile boolean cancelled;
     /** False models a slow cancellation: the native inference keeps running after the stop was triggered. */
@@ -30,8 +36,8 @@ final class FakeRuntime implements LitertRuntime {
     /** How many generations ever saw their own cancel, and how many started: a cancel of one must not touch another. */
     final java.util.concurrent.atomic.AtomicInteger stopsTriggered = new java.util.concurrent.atomic.AtomicInteger();
 
-    @Override public Loaded load(String modelPath, LitertBackend backend, int contextTokens) throws LitertFailure {
-        log.add("load " + backend.wire + " " + modelPath + " " + contextTokens);
+    @Override public Loaded load(String modelPath, LitertBackend backend, int contextTokens, LitertActivation activation) throws LitertFailure {
+        log.add("load " + backend.wire + " " + modelPath + " " + contextTokens + (activation == LitertActivation.DEFAULT ? "" : " " + activation.wire));
         if (loading != null) loading.countDown();
         if (releaseLoad != null) {
             try { releaseLoad.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -65,7 +71,7 @@ final class FakeRuntime implements LitertRuntime {
                     if (token.isCancelled()) throw cancelledFailure(backend);
                     if (generateFailure != null) throw generateFailure;
                     if (generateCrash != null) throw generateCrash;
-                    output = new Output("answer", "stop");
+                    output = new Output(answer, "stop", thinking, toolCalls);
                 } catch (LitertFailure f) {
                     failure = f;
                 } catch (RuntimeException e) {
@@ -89,7 +95,10 @@ final class FakeRuntime implements LitertRuntime {
                 return evidence;
             }
 
-            @Override public void close() { log.add("close"); }
+            @Override public void close() {
+                log.add("close");
+                if (closeFailure != null) throw closeFailure;
+            }
         };
     }
 
