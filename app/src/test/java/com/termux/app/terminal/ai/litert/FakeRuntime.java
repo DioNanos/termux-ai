@@ -19,6 +19,15 @@ final class FakeRuntime implements LitertRuntime {
     CountDownLatch inEvidence;       // counted down when evidence() is asked
     CountDownLatch releaseEvidence;  // evidence() waits for it when set
     String evidence = "";
+    /** The chat of the latest generation, as the runtime received it. */
+    volatile LitertChat lastChat;
+    /** What the next generations answer, think and ask for. */
+    String answer = "answer";
+    String thinking = "";
+    List<LitertChat.Call> toolCalls = new ArrayList<>();
+    /** The text the next generations answer; used with tool calls to model an answer made of calls only. */
+    /** When set, closing an engine throws it (after being logged): a close that did not complete. */
+    RuntimeException closeFailure;
     /** True while the native stop of a generation has been triggered and that generation is still running. */
     volatile boolean cancelled;
     /** False models a slow cancellation: the native inference keeps running after the stop was triggered. */
@@ -30,8 +39,8 @@ final class FakeRuntime implements LitertRuntime {
     /** How many generations ever saw their own cancel, and how many started: a cancel of one must not touch another. */
     final java.util.concurrent.atomic.AtomicInteger stopsTriggered = new java.util.concurrent.atomic.AtomicInteger();
 
-    @Override public Loaded load(String modelPath, LitertBackend backend, int contextTokens) throws LitertFailure {
-        log.add("load " + backend.wire + " " + modelPath + " " + contextTokens);
+    @Override public Loaded load(String modelPath, LitertBackend backend, int contextTokens, LitertActivation activation) throws LitertFailure {
+        log.add("load " + backend.wire + " " + modelPath + " " + contextTokens + (activation == LitertActivation.DEFAULT ? "" : " " + activation.wire));
         if (loading != null) loading.countDown();
         if (releaseLoad != null) {
             try { releaseLoad.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -39,9 +48,10 @@ final class FakeRuntime implements LitertRuntime {
         if (loadFailure != null) throw loadFailure;
         if (loadCrash != null) throw loadCrash;
         return new Loaded() {
-            @Override public Output generate(String prompt, int maxTokens, double temperature, int topK, double topP, int seed,
+            @Override public Output generate(LitertChat chat, int maxTokens, double temperature, int topK, double topP, int seed,
                                              LitertCancelToken token) throws LitertFailure {
-                log.add("generate " + prompt + " " + maxTokens + " " + temperature + " " + topK + " " + topP + " " + seed);
+                lastChat = chat;
+                log.add("generate " + chat.last.text + " " + maxTokens + " " + temperature + " " + topK + " " + topP + " " + seed);
                 // Like the real engine: nothing is kept between generations; the stop hangs on this request's token.
                 cancelled = false;
                 if (token.isCancelled()) throw cancelledFailure(backend);
@@ -65,7 +75,7 @@ final class FakeRuntime implements LitertRuntime {
                     if (token.isCancelled()) throw cancelledFailure(backend);
                     if (generateFailure != null) throw generateFailure;
                     if (generateCrash != null) throw generateCrash;
-                    output = new Output("answer", "stop");
+                    output = new Output(answer, toolCalls.isEmpty() ? "stop" : "tool_calls", thinking, toolCalls);
                 } catch (LitertFailure f) {
                     failure = f;
                 } catch (RuntimeException e) {
@@ -89,7 +99,10 @@ final class FakeRuntime implements LitertRuntime {
                 return evidence;
             }
 
-            @Override public void close() { log.add("close"); }
+            @Override public void close() {
+                log.add("close");
+                if (closeFailure != null) throw closeFailure;
+            }
         };
     }
 

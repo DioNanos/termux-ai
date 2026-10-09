@@ -86,4 +86,63 @@ public class LitertParamsTest {
         assertEquals(0.0, edge.temperature, 0);
         assertEquals(1, edge.topK);
     }
+
+    @Test public void activationIsDefaultWhenAbsentAndFp16OrFp32WhenAsked() throws Exception {
+        assertEquals(LitertActivation.DEFAULT, LitertParams.fromArgs(base()).activation);
+        assertEquals(LitertActivation.FP32, LitertParams.fromArgs(base().put("activation", "fp32")).activation);
+        assertEquals(LitertActivation.FP16, LitertParams.fromArgs(base().put("activation", "fp16")).activation);
+    }
+
+    @Test public void anyOtherActivationIsRejectedNeverClamped() throws Exception {
+        for (Object bad : new Object[] {"FP32", "fp8", "int8", "default", "", 32}) {
+            try {
+                LitertParams.fromArgs(base().put("activation", bad));
+                fail("expected a rejection of " + bad);
+            } catch (LitertFailure f) {
+                assertEquals(LitertErrorCode.INVALID_ARGUMENT, f.code);
+                assertTrue(f.getMessage(), f.getMessage().contains("activation"));
+            }
+        }
+    }
+
+    // ---- messages (roles kept) in place of one flat prompt
+
+    private static JSONObject withMessages(String messagesJson) throws Exception {
+        JSONObject args = base();
+        args.remove("prompt");
+        return args.put("messages", new org.json.JSONArray(messagesJson));
+    }
+
+    @Test public void messagesCanReplaceThePromptAndKeepTheirRoles() throws Exception {
+        LitertParams p = LitertParams.fromArgs(withMessages(
+            "[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}]"));
+        assertEquals(null, p.prompt);
+        assertEquals(2, p.messages.length());
+    }
+
+    @Test public void aPromptAndMessagesTogetherAreRejected() throws Exception {
+        rejects(withMessages("[{\"role\":\"user\",\"content\":\"u\"}]").put("prompt", "x"), "either");
+    }
+
+    @Test public void badMessagesAreRejectedWithTheirReason() throws Exception {
+        rejects(withMessages("[{\"role\":\"user\",\"content\":\"u\"},{\"role\":\"assistant\",\"content\":\"a\"}]"), "last message");
+        JSONObject notAnArray = base();
+        notAnArray.remove("prompt");
+        rejects(notAnArray.put("messages", "text"), "messages must be an array");
+    }
+
+    @Test public void messagesThatCannotCrossTheWorkerBoundaryAreRejected() throws Exception {
+        String big = new String(new char[LitertParams.MAX_PROMPT_BYTES + 1]).replace('\0', 'a');
+        rejects(withMessages("[{\"role\":\"user\",\"content\":\"" + big + "\"}]"), "messages are larger");
+    }
+
+    @Test public void toolsTravelWithMessagesAndNeverWithAFlatPrompt() throws Exception {
+        String tool = "[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]";
+        LitertParams p = LitertParams.fromArgs(withMessages("[{\"role\":\"user\",\"content\":\"u\"}]").put("tools", new org.json.JSONArray(tool)));
+        assertEquals(1, p.tools.length());
+        assertEquals(null, LitertParams.fromArgs(withMessages("[{\"role\":\"user\",\"content\":\"u\"}]")).tools);
+        rejects(base().put("tools", new org.json.JSONArray(tool)), "tools need messages");
+        rejects(withMessages("[{\"role\":\"user\",\"content\":\"u\"}]").put("tools", "x"), "tools must be an array");
+        rejects(withMessages("[{\"role\":\"user\",\"content\":\"u\"}]").put("tools", new org.json.JSONArray("[{\"type\":\"function\"}]")), "tool");
+    }
 }

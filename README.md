@@ -148,6 +148,9 @@ termux-ai aicore generate "say hello"
 Output is compact JSON by default. Commands return exit code `0` only when the
 bridge reports success.
 
+The socket commands (`aicore`, `litert`) need `nc` (netcat) in Termux:
+`pkg install netcat-openbsd`. Without it they exit with code `2` and say so.
+
 ## Termux:API Compatibility
 
 Termux AI Classic includes a first internal compatibility wave for common

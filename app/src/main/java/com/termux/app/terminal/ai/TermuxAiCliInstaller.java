@@ -52,10 +52,16 @@ public final class TermuxAiCliInstaller {
 
         installManagedHelpers(context);
         installLibexecApi(context);
-        installNamedAsset(context, "termux-ai-mcp",
-            new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR, "termux-ai-mcp"));
+        installNamedAssets(context, TermuxConstants.TERMUX_BIN_PREFIX_DIR);
         writeManifest();
         deleteOldHelpers();
+    }
+
+    /** The helper scripts the app ships next to the CLI, each installed under its own name. */
+    static final String[] NAMED_ASSETS = {"termux-ai-mcp", "termux-ai-serve"};
+
+    static void installNamedAssets(Context context, File binDir) {
+        for (String assetName : NAMED_ASSETS) installNamedAsset(context, assetName, new File(binDir, assetName));
     }
 
     private static void installNamedAsset(Context context, String assetName, File file) {

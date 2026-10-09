@@ -197,13 +197,21 @@ public final class TermuxAiSocketServer {
                         return ok(storageWrite(args));
                     case "aicore.info":
                     case "aicore.models":
+                        return ok(aicoreCommands().handle(cmd, args));
                     case "aicore.generate":
                     case "aicore.download":
+                        // The engine answers only with the app in the foreground: bring the run
+                        // surface up first, or fail typed without attempting the call.
+                        AiForegroundGate.ensureResumed(context);
                         return ok(aicoreCommands().handle(cmd, args));
                     case "litert.info":
                     case "litert.models":
+                    case "litert.unload":
+                    case "litert.restart":
+                    case "litert.cancel":
+                    case "litert.config":
                     case "litert.generate":
-                        return ok(new LitertCommands(LitertApp.engine(context)).handle(cmd, args));
+                        return ok(new LitertCommands(LitertApp.engine(context), LitertApp.config()).handle(cmd, args));
                     default:
                         return error("Unknown command: " + cmd);
                 }
@@ -260,6 +268,10 @@ public final class TermuxAiSocketServer {
                     .put("aicore.download")
                     .put("litert.info")
                     .put("litert.models")
+                    .put("litert.unload")
+                    .put("litert.restart")
+                    .put("litert.cancel")
+                    .put("litert.config")
                     .put("litert.generate"));
         }
 

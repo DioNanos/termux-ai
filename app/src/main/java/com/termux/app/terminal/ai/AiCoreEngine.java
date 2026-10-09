@@ -28,11 +28,23 @@ public final class AiCoreEngine {
     static final int STATUS_DOWNLOADING = 2;
     static final int STATUS_AVAILABLE = 3;
 
+    /** The AICore jobs (generate, download, stream) running right now: the run surface closes on an empty queue. */
+    private static final java.util.concurrent.atomic.AtomicInteger ACTIVE_JOBS =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+
     private final GenAiPort port;
     private final IntSupplier sdkInt;
     private final LongSupplier clockMs;
     private final AtomicReference<String> lastError = new AtomicReference<>(null);
     private final ConcurrentHashMap<String, Future<?>> inflight = new ConcurrentHashMap<>();
+    /** The one background download: a second request reports the running one instead of racing it. */
+    private final java.util.concurrent.atomic.AtomicReference<ModelSelection> downloading =
+        new java.util.concurrent.atomic.AtomicReference<>(null);
+    private final ExecutorService downloadExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "termux-ai-download");
+        t.setDaemon(true);
+        return t;
+    });
     private final ExecutorService streamExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "termux-ai-stream");
         t.setDaemon(true);
@@ -46,6 +58,9 @@ public final class AiCoreEngine {
     }
 
     public boolean isSdkSupported() { return sdkInt.getAsInt() >= MIN_SDK; }
+
+    /** How many AICore jobs are running right now, across every caller. */
+    public static int activeJobs() { return ACTIVE_JOBS.get(); }
 
     public String lastInitError() { return lastError.get(); }
 
@@ -156,13 +171,62 @@ public final class AiCoreEngine {
             .put("note", "AICore does not list models: each stage/preference pair is probed with checkStatus() and getBaseModelName()");
     }
 
+    /** The download that answers only when it is over (the CLI's --wait). */
     public JSONObject download(ModelSelection selection) throws Exception {
         requireSdk();
-        port.download(selection, bytes -> { /* progress is not part of the answer */ });
+        ACTIVE_JOBS.incrementAndGet();
+        try {
+            port.download(selection, bytes -> { /* progress is not part of the answer */ });
+            int status = port.checkStatus(selection);
+            return new JSONObject()
+                .put("status", statusName(status))
+                .put("available", status == STATUS_AVAILABLE)
+                .put("stage", selection.stage.wire)
+                .put("preference", selection.preference.wire);
+        } finally {
+            ACTIVE_JOBS.decrementAndGet();
+        }
+    }
+
+    /** Downloads in one background thread and answers at once: nothing holds the caller. */
+    public JSONObject downloadAsync(ModelSelection selection) throws Exception {
+        requireSdk();
+        if (!downloading.compareAndSet(null, selection)) {
+            ModelSelection running = downloading.get();
+            return new JSONObject()
+                .put("started", false)
+                .put("already_running", true)
+                .put("stage", running.stage.wire)
+                .put("preference", running.preference.wire);
+        }
+        downloadExecutor.submit(() -> {
+            ACTIVE_JOBS.incrementAndGet();
+            try {
+                port.download(selection, bytes -> { /* progress is not part of the answer */ });
+                int status = port.checkStatus(selection);
+                lastError.set(status == STATUS_AVAILABLE ? null : "download finished with status " + statusName(status));
+            } catch (Exception e) {
+                lastError.set(e.getMessage());
+            } finally {
+                ACTIVE_JOBS.decrementAndGet();
+                downloading.set(null);
+            }
+        });
+        return new JSONObject()
+            .put("started", true)
+            .put("stage", selection.stage.wire)
+            .put("preference", selection.preference.wire);
+    }
+
+    /** The status only: nothing is started, nothing is waited for. */
+    public JSONObject downloadStatus(ModelSelection selection) throws Exception {
+        requireSdk();
         int status = port.checkStatus(selection);
+        ModelSelection running = downloading.get();
         return new JSONObject()
             .put("status", statusName(status))
             .put("available", status == STATUS_AVAILABLE)
+            .put("downloading", running != null)
             .put("stage", selection.stage.wire)
             .put("preference", selection.preference.wire);
     }
@@ -173,7 +237,15 @@ public final class AiCoreEngine {
         if (status != STATUS_AVAILABLE) {
             throw new IllegalStateException("Model not available: " + statusName(status));
         }
-        long start = clockMs.getAsLong();
+        ACTIVE_JOBS.incrementAndGet();
+        try {
+            return generateLocked(params, selection, clockMs.getAsLong());
+        } finally {
+            ACTIVE_JOBS.decrementAndGet();
+        }
+    }
+
+    private JSONObject generateLocked(GenParams params, ModelSelection selection, long start) throws Exception {
         GenResult result = port.generate(selection, params);
         long latencyMs = clockMs.getAsLong() - start;
         JSONObject json = new JSONObject()
@@ -189,6 +261,18 @@ public final class AiCoreEngine {
             .put("temperature", (double) params.temperature);
         if (params.topK != null) json.put("top_k", params.topK.intValue());
         return json;
+    }
+
+    /** The selection whose model reports the given base name, or null when no pair does. */
+    public ModelSelection selectionForName(String name) {
+        for (ModelSelection candidate : ModelSelection.all()) {
+            try {
+                if (name.equals(port.baseModelName(candidate))) return candidate;
+            } catch (Exception e) {
+                // that pair is simply not the name the caller asked for
+            }
+        }
+        return null;
     }
 
     /** Streams in the background; {@link #cancel} interrupts it. */

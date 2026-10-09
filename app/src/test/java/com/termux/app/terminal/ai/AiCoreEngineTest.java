@@ -27,8 +27,7 @@ public class AiCoreEngineTest {
     // ------------------------------------------------------------ models
     @Test
     public void modelsProbesTheFourCombinationsWithStatusAndBaseModelName() throws Exception {
-        JSONObject out = engine.models();
-        JSONArray models = out.getJSONArray("models");
+        JSONObject out = engine.models();        JSONArray models = out.getJSONArray("models");
         assertEquals(4, models.length());
         assertEquals(4, port.statusSelections.size());
         assertEquals(4, port.calls.stream().filter(c -> c.startsWith("baseModelName")).count());
@@ -128,6 +127,29 @@ public class AiCoreEngineTest {
         assertEquals(s, port.downloadSelections.get(0));
         assertEquals(s, port.generateSelections.get(0));
         for (ModelSelection seen : port.statusSelections) assertEquals(s, seen);
+    }
+
+    @Test
+    public void anAsyncDownloadAnswersAtOnceAndTheStatusSaysWhenItIsOver() throws Exception {
+        ModelSelection s = ModelSelection.DEFAULT;
+        JSONObject out = engine.downloadAsync(s);
+        assertTrue(out.getBoolean("started"));
+        assertFalse(out.optBoolean("already_running", false));
+        // the download runs in the background: wait for it to be reported over
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (engine.downloadStatus(s).getBoolean("downloading")) {
+            assertTrue("the background download never finished", System.currentTimeMillis() < deadline);
+            Thread.sleep(10);
+        }
+        assertTrue(port.calls.stream().anyMatch(c -> c.startsWith("download ")));
+        JSONObject status = engine.downloadStatus(s);
+        assertFalse(status.getBoolean("downloading"));
+    }
+
+    @Test
+    public void theStatusOnlyDownloadStartsNothing() throws Exception {
+        engine.downloadStatus(ModelSelection.DEFAULT);
+        assertTrue(port.calls.stream().noneMatch(c -> c.startsWith("download ")));
     }
 
     @Test

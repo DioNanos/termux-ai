@@ -7,7 +7,7 @@ public interface LitertRuntime {
      *
      * @throws LitertFailure with the SDK's own message
      */
-    Loaded load(String modelPath, LitertBackend backend, int contextTokens) throws LitertFailure;
+    Loaded load(String modelPath, LitertBackend backend, int contextTokens, LitertActivation activation) throws LitertFailure;
 
     interface Loaded {
         /**
@@ -15,7 +15,7 @@ public interface LitertRuntime {
          * The request's {@code token} is the only way to stop it: the runtime attaches the native stop to the token
          * for the duration of the generation and detaches it before returning, and it never keeps a cancel for later.
          */
-        Output generate(String prompt, int maxTokens, double temperature, int topK, double topP, int seed,
+        Output generate(LitertChat chat, int maxTokens, double temperature, int topK, double topP, int seed,
                         LitertCancelToken token) throws LitertFailure;
 
         /** What the runtime could observe about the executor, as plain text; never a claim of execution. */
@@ -27,12 +27,25 @@ public interface LitertRuntime {
 
     final class Output {
         public final String text;
-        /** One of stop, max_tokens, other. */
+        /** One of stop, max_tokens, tool_calls, other. */
         public final String finishReason;
+        /** What the model wrote on its thinking channels; empty when it has none. Never part of the answer. */
+        public final String thinking;
+        /** The tool calls the model asked for; they are not executed, the caller runs them. */
+        public final java.util.List<LitertChat.Call> toolCalls;
+        /** How many tool calls the model asked for. */
+        public final int toolCallsCount;
 
         public Output(String text, String finishReason) {
+            this(text, finishReason, "", java.util.Collections.emptyList());
+        }
+
+        public Output(String text, String finishReason, String thinking, java.util.List<LitertChat.Call> toolCalls) {
             this.text = text == null ? "" : text;
             this.finishReason = finishReason;
+            this.thinking = thinking == null ? "" : thinking;
+            this.toolCalls = toolCalls == null ? java.util.Collections.emptyList() : toolCalls;
+            this.toolCallsCount = this.toolCalls.size();
         }
     }
 }

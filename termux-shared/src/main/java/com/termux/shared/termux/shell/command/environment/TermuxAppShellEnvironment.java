@@ -56,6 +56,8 @@ public class TermuxAppShellEnvironment {
 
     /** Environment variable for the Termux app process selinux context. */
     public static final String ENV_TERMUX_APP__SE_PROCESS_CONTEXT = TERMUX_APP_ENV_PREFIX + "SE_PROCESS_CONTEXT";
+    /** Environment variable for the calling process's own selinux context, exported for the termux-exec PTY hook: with it set, the hook does not open /proc/self/attr/current between fork and exec. */
+    public static final String ENV_TERMUX__SE_PROCESS_CONTEXT = TermuxConstants.TERMUX_ENV_PREFIX_ROOT + "__SE_PROCESS_CONTEXT";
     /** Environment variable for the Termux app data files selinux context. */
     public static final String ENV_TERMUX_APP__SE_FILE_CONTEXT = TERMUX_APP_ENV_PREFIX + "SE_FILE_CONTEXT";
     /** Environment variable for the Termux app seInfo tag found in selinux policy used to set app process and app data files selinux context. */
@@ -136,6 +138,7 @@ public class TermuxAppShellEnvironment {
             ShellEnvironmentUtils.putToEnvIfSet(environment, ENV_TERMUX_APP__FILES_DIR, filesDirPath);
 
             ShellEnvironmentUtils.putToEnvIfSet(environment, ENV_TERMUX_APP__SE_PROCESS_CONTEXT, SELinuxUtils.getContext());
+            ShellEnvironmentUtils.putToEnvIfSet(environment, ENV_TERMUX__SE_PROCESS_CONTEXT, SELinuxUtils.getContext());
             ShellEnvironmentUtils.putToEnvIfSet(environment, ENV_TERMUX_APP__SE_FILE_CONTEXT, SELinuxUtils.getFileContext(filesDirPath));
 
             String seInfoUser = PackageUtils.getApplicationInfoSeInfoUserForPackage(applicationInfo);
