@@ -1,0 +1,15 @@
+{
+  "present": true,
+  "technology": "Li-poly",
+  "health": "GOOD",
+  "plugged": "PLUGGED_USB",
+  "status": "CHARGING",
+  "temperature": 29.0,
+  "voltage": 4351,
+  "current": -412000,
+  "current_average": -405000,
+  "percentage": 87,
+  "level": 87,
+  "scale": 100,
+  "charge_counter": 2400000
+}

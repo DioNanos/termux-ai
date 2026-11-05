@@ -13,6 +13,8 @@ final class FakeWorker implements LitertWorker {
         "\"backend_effective\":\"cpu\",\"backend_verified\":true,\"backend_evidence\":\"cpu only\",\"engine_reused\":false,\"load_ms\":12,\"generate_ms\":34}}";
     LitertFailure failure;
     boolean connected = true;
+    /** Set by tests whose stop ends the process: the connection goes away once the reply has left. */
+    boolean diesAfterReply;
     CountDownLatch entered;
     CountDownLatch release;
 
@@ -23,6 +25,7 @@ final class FakeWorker implements LitertWorker {
             try { release.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
         if (failure != null) throw failure;
+        if (diesAfterReply) connected = false;
         return reply;
     }
 

@@ -5,9 +5,12 @@ usage: stub_socket_server.py SOCKET_PATH LOG_PATH MODE [ARG]
 
 Every request line is appended to LOG_PATH (raw). MODE:
   reply FILE    answer with the contents of FILE and close
+  routes FILE   answer each command with the first matching line (CMD SP JSON);
+                a command with no line answers ok:false with error_name NO_ROUTE
   echo          answer ok:true with the received prompt as data.text (ASCII-escaped JSON)
   echo-raw      same, with raw UTF-8 in the JSON string
   drop          read the request, then close without answering (broken transport)
+  hang          a generation never answers (it stays open 30 s); litert.cancel is answered cancelled:true
 """
 import json
 import os
@@ -39,9 +42,29 @@ def handle(conn):
             log.write(line + b"\n")
         if mode == "drop":
             return
+        if mode == "hang":
+            if json.loads(line.decode("utf-8")).get("cmd") == "litert.cancel":
+                conn.sendall(b'{"ok":true,"data":{"cancelled":true}}\n')
+            else:
+                import time
+                time.sleep(30)
+            return
         if mode == "reply":
             with open(arg, "rb") as handle_file:
                 conn.sendall(handle_file.read())
+            return
+        if mode == "routes":
+            request = json.loads(line.decode("utf-8"))
+            with open(arg, encoding="utf-8") as table:
+                for table_line in table:
+                    table_line = table_line.rstrip("\n")
+                    if not table_line:
+                        continue
+                    prefix, payload = table_line.split(" ", 1)
+                    if prefix == request.get("cmd"):
+                        conn.sendall(payload.encode("utf-8") + b"\n")
+                        return
+            conn.sendall(b'{"ok":false,"error_name":"NO_ROUTE","error":"no route for this command"}\n')
             return
         request = json.loads(line.decode("utf-8"))
         prompt = request["args"]["prompt"]

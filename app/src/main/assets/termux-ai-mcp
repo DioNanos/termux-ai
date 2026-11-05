@@ -1,19 +1,50 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# android-control MCP shim — bridges stdio <-> the in-APK MCP Unix socket.
-# Point an MCP client (claude/codex) at this command as a stdio MCP server.
+# android-control MCP shim: thin launcher of the in-APK stdio bridge.
 #
-# The socket is private (0600, com.termux sandbox); only this uid can connect.
-SOCK="/data/data/com.termux/files/apps/com.termux/termux-ai/mcp.sock"
+# It only resolves the installed base APK and starts
+#   app_process <base apk> com.termux.app.mcp.McpStdioShim
+# which speaks to the in-APK MCP server over its private unix socket and presents
+# the server token itself. The token is read from its private file by the bridge: it
+# never appears on a command line, in the environment or on stdout.
+#
+# Point an MCP client (claude/codex) at this command as a stdio MCP server.
+# stdout carries only MCP frames. Failures here are one fixed line on stderr.
+#
+# An older copy of this script cannot present the token and is refused by the server
+# on purpose: there is no compatibility mode.
 
-if [ ! -S "$SOCK" ]; then
-    echo "android-control: MCP socket not found ($SOCK)." >&2
-    echo "Open termux-ai once and enable Accessibility > Termux AI android-control." >&2
+PM="/system/bin/pm"
+APP_PROCESS="/system/bin/app_process"
+PACKAGE="com.termux"
+MAIN_CLASS="com.termux.app.mcp.McpStdioShim"
+
+fail() {
+    echo "android-control: $1" >&2
     exit 1
-fi
+}
 
-if ! command -v socat >/dev/null 2>&1; then
-    echo "android-control: 'socat' is required. Install it with: pkg install socat" >&2
-    exit 1
-fi
+# The system tools must not see Termux's own libraries.
+unset LD_LIBRARY_PATH LD_PRELOAD
 
-exec socat - "UNIX-CONNECT:$SOCK"
+[ -x "$PM" ] && [ -x "$APP_PROCESS" ] || fail "E_NO_RUNTIME"
+
+PATHS=$("$PM" path "$PACKAGE" 2>/dev/null) || fail "E_NO_APK"
+
+APK=""
+while IFS= read -r line; do
+    case "$line" in
+        package:/*/base.apk) APK="${line#package:}" ;;
+    esac
+done <<EOT
+$PATHS
+EOT
+
+# One absolute path, no classpath separator, no whitespace.
+case "$APK" in
+    "") fail "E_NO_APK" ;;
+    *:* | *" "* | *"	"*) fail "E_NO_APK" ;;
+esac
+
+CLASSPATH="$APK"
+export CLASSPATH
+exec "$APP_PROCESS" /system/bin "$MAIN_CLASS"

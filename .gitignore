@@ -37,3 +37,7 @@ local.properties
 .swp
 ehthumbs.db
 Thumbs.db
+
+# Python bytecode (the serve script is tested by running it)
+__pycache__/
+*.pyc

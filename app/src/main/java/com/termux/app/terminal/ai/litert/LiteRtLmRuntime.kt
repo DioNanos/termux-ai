@@ -1,13 +1,18 @@
 package com.termux.app.terminal.ai.litert
 
+import com.google.ai.edge.litertlm.ActivationDataType
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ToolCall
+import com.google.ai.edge.litertlm.tool
 import java.io.File
 
 /**
@@ -19,12 +24,18 @@ class LiteRtLmRuntime(
     private val cacheDir: String,
 ) : LitertRuntime {
 
-    override fun load(modelPath: String, backend: LitertBackend, contextTokens: Int): LitertRuntime.Loaded {
+    override fun load(modelPath: String, backend: LitertBackend, contextTokens: Int, activation: LitertActivation): LitertRuntime.Loaded {
         val config = EngineConfig(
             modelPath = modelPath,
             backend = sdkBackend(backend),
             maxNumTokens = contextTokens,
             cacheDir = cacheDir,
+            // null leaves the choice to the SDK (fp16 on GPU): only an explicit request changes the precision.
+            activationDataType = when (activation) {
+                LitertActivation.DEFAULT -> null
+                LitertActivation.FP16 -> ActivationDataType.FLOAT16
+                LitertActivation.FP32 -> ActivationDataType.FLOAT32
+            },
         )
         val engine = Engine(config)
         try {
@@ -51,19 +62,39 @@ class LiteRtLmRuntime(
     private class Loaded(private val engine: Engine, private val backend: LitertBackend) : LitertRuntime.Loaded {
 
         override fun generate(
-            prompt: String, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
+            chat: LitertChat, maxTokens: Int, temperature: Double, topK: Int, topP: Double, seed: Int,
             token: LitertCancelToken,
         ): LitertRuntime.Output {
             // The cancel belongs to the request's token, not to this engine: nothing is remembered here, so a cancel
             // can never reach the next request that runs on the same engine.
             if (token.isCancelled) throw cancelledFailure()
             val conversation = try {
+                // The roles are kept: the system instruction and the history are the conversation's own, and only
+                // the last message is sent. Nothing is flattened into one user turn.
+                val history = chat.history.map { sdkMessage(it) }
+                // The tools are only declared: the model may ask for one, but the app never runs it (automatic tool
+                // calling is off). The caller runs the tool and sends the result back as a tool message.
+                val tools = chat.tools.map { tool(DeclaredTool(it)) }
+                val sampler = SamplerConfig(topK, topP, temperature, seed)
                 engine.createConversation(
-                    ConversationConfig(
-                        samplerConfig = SamplerConfig(topK, topP, temperature, seed),
-                        automaticToolCalling = false,
-                        maxOutputToken = maxTokens,
-                    )
+                    if (chat.system != null) {
+                        ConversationConfig(
+                            systemInstruction = Contents.of(chat.system),
+                            initialMessages = history,
+                            tools = tools,
+                            samplerConfig = sampler,
+                            automaticToolCalling = false,
+                            maxOutputToken = maxTokens,
+                        )
+                    } else {
+                        ConversationConfig(
+                            initialMessages = history,
+                            tools = tools,
+                            samplerConfig = sampler,
+                            automaticToolCalling = false,
+                            maxOutputToken = maxTokens,
+                        )
+                    }
                 )
             } catch (e: Exception) {
                 throw failure(LitertErrorCode.GENERATION_FAILED, backend, "generate", e)
@@ -74,9 +105,10 @@ class LiteRtLmRuntime(
             var problem: LitertFailure? = null
             try {
                 if (token.isCancelled) throw cancelledFailure()
-                val reply = conversation.sendMessage(prompt)
+                val reply = conversation.sendMessage(sdkMessage(chat.last))
                 if (token.isCancelled) throw cancelledFailure()
-                output = LitertRuntime.Output(text(reply), "other")
+                val calls = reply.toolCalls.map { LitertChat.Call("", it.name, LitertJson.fromMap(it.arguments)) }
+                output = LitertRuntime.Output(text(reply), if (calls.isEmpty()) "other" else "tool_calls", thinking(reply), calls)
             } catch (e: LitertFailure) {
                 problem = e
             } catch (e: Exception) {
@@ -96,20 +128,43 @@ class LiteRtLmRuntime(
 
         override fun evidence(): String = mappedExecutorLibraries()
 
+        // A close that fails is thrown, not swallowed: the runner records it, so a leak is something we can see.
         override fun close() {
-            runCatching { engine.close() }
+            engine.close()
         }
 
         private fun cancelledFailure() =
             LitertFailure(LitertErrorCode.CANCELLED, backend.wire, "generate", null, "the generation was cancelled", null)
     }
 
+    /** A tool the model may call. Never executed here: the caller runs it, so [execute] is not reachable. */
+    private class DeclaredTool(private val description: String) : OpenApiTool {
+        override fun getToolDescriptionJsonString(): String = description
+
+        override fun execute(paramsJsonString: String): String =
+            throw IllegalStateException("tools are run by the caller, not by the engine")
+    }
+
     private companion object {
         const val MAX_CPU_THREADS = 4
+
+        /** One message of the chat as the SDK's own: user, model (with the calls it made) or a tool result. */
+        fun sdkMessage(m: LitertChat.Msg): Message = when (m.role) {
+            LitertChat.Role.USER -> Message.user(m.text)
+            LitertChat.Role.MODEL -> Message.model(
+                if (m.text.isEmpty()) Contents.of(emptyList<Content>()) else Contents.of(m.text),
+                m.calls.map { ToolCall(it.name, LitertJson.toMap(it.arguments)) },
+            )
+            LitertChat.Role.TOOL -> Message.tool(Contents.of(Content.ToolResponse(m.toolName, m.text)))
+        }
 
         /** The reply text: every text part, in order. Thinking channels are not part of the answer. */
         fun text(message: Message): String =
             message.contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }
+
+        /** What the model wrote on its channels (its thinking), one channel per line; empty when there is none. */
+        fun thinking(message: Message): String =
+            message.channels.values.filter { it.isNotEmpty() }.joinToString("\n")
 
         /** The SDK reports no limit error of its own: the wording is the only signal, so it is matched narrowly. */
         fun classify(e: Exception): LitertErrorCode {

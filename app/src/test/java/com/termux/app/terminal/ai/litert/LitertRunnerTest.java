@@ -37,6 +37,26 @@ public class LitertRunnerTest {
         assertEquals("generate hi 64 0.5 20 1.0 0", runtime.log.get(1));
     }
 
+    @Test public void aRequestWithMessagesReachesTheRuntimeWithItsRolesNotFlattened() throws Exception {
+        JSONObject req = json(request("a", "cpu", "m"));
+        req.remove("prompt");
+        req.put("messages", new org.json.JSONArray("[{\"role\":\"system\",\"content\":\"s\"},"
+            + "{\"role\":\"user\",\"content\":\"q\"},{\"role\":\"assistant\",\"content\":\"a\"},"
+            + "{\"role\":\"user\",\"content\":\"last\"}]"));
+        assertTrue(json(runner.handle(req.toString())).getBoolean("ok"));
+        LitertChat chat = runtime.lastChat;
+        assertEquals("s", chat.system);
+        assertEquals(2, chat.history.size());
+        assertEquals("last", chat.last.text);
+    }
+
+    @Test public void aRequestWithBadMessagesIsAnInvalidArgument() throws Exception {
+        JSONObject req = json(request("a", "cpu", "m"));
+        req.remove("prompt");
+        req.put("messages", new org.json.JSONArray("[{\"role\":\"user\",\"content\":\"q\"},{\"role\":\"assistant\",\"content\":\"a\"}]"));
+        assertEquals("INVALID_ARGUMENT", json(runner.handle(req.toString())).getString("error_name"));
+    }
+
     @Test public void gpuAndNpuNeverClaimAnExecutor() throws Exception {
         for (String backend : new String[] {"gpu", "npu"}) {
             JSONObject data = json(runner.handle(request("a-" + backend, backend, backend))).getJSONObject("data");
@@ -347,5 +367,122 @@ public class LitertRunnerTest {
         JSONObject next = json(runner.handle(request("three", "cpu", "m")));
         assertTrue("accepted again once the stop returned: " + next, next.getBoolean("ok"));
         assertFalse("the engine of the stuck stop was dropped", next.getJSONObject("data").getBoolean("engine_reused"));
+    }
+
+    // ---- 6c: an empty answer is not a success, and what the model also produced is reported
+
+    @Test public void anEmptyAnswerIsATypedErrorNeverOkTrue() throws Exception {
+        runtime.answer = "";
+        runtime.thinking = "step one";
+        JSONObject r = json(runner.handle(request("e1", "cpu", "m")));
+        assertFalse(r.toString(), r.getBoolean("ok"));
+        assertEquals("EMPTY_OUTPUT", r.getString("error_name"));
+        assertEquals("generate", r.getString("phase"));
+        assertTrue(r.getString("error"), r.getString("error").contains("thinking 8 chars"));
+        assertTrue(r.getString("error"), r.getString("error").contains("tool calls 0"));
+    }
+
+    @Test public void anAnswerOfOnlyWhitespaceIsEmptyToo() throws Exception {
+        runtime.answer = "  \n\t ";
+        assertEquals("EMPTY_OUTPUT", json(runner.handle(request("e2", "cpu", "m"))).getString("error_name"));
+    }
+
+    @Test public void anEmptyAnswerDoesNotCostTheEngine() throws Exception {
+        runtime.answer = "";
+        runner.handle(request("e3", "cpu", "m"));
+        runtime.answer = "back";
+        JSONObject data = json(runner.handle(request("e4", "cpu", "m"))).getJSONObject("data");
+        assertEquals("back", data.getString("text"));
+        assertTrue("the engine opened for the empty answer is reused", data.getBoolean("engine_reused"));
+        assertEquals(1, java.util.Collections.frequency(runtime.log, "load cpu /models/m.litertlm 4096"));
+        assertFalse(runtime.log.contains("close"));
+    }
+
+    @Test public void thinkingAndToolCallsAreReportedNextToTheAnswer() throws Exception {
+        runtime.thinking = "because";
+        runtime.toolCalls.add(new LitertChat.Call("", "a", new JSONObject()));
+        runtime.toolCalls.add(new LitertChat.Call("", "b", new JSONObject()));
+        JSONObject data = json(runner.handle(request("e5", "cpu", "m"))).getJSONObject("data");
+        assertEquals("answer", data.getString("text"));
+        assertEquals("because", data.getString("thinking"));
+        assertEquals(2, data.getInt("tool_calls_count"));
+        assertEquals(2, data.getJSONArray("tool_calls").length());
+    }
+
+    private static final String WEATHER_TOOL = "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        + "\"description\":\"Weather of a city\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}}";
+
+    private static JSONObject chatRequest(String id) throws Exception {
+        JSONObject req = json(request(id, "cpu", "m"));
+        req.remove("prompt");
+        return req.put("messages", new org.json.JSONArray("[{\"role\":\"user\",\"content\":\"weather in Rome?\"}]"));
+    }
+
+    @Test public void theToolsOfTheRequestReachTheRuntimeAndTheCallsComeBackStructured() throws Exception {
+        runtime.answer = "";
+        runtime.toolCalls.add(new LitertChat.Call("", "get_weather", new JSONObject().put("city", "Rome")));
+        JSONObject req = chatRequest("t1").put("tools", new org.json.JSONArray("[" + WEATHER_TOOL + "]"));
+        JSONObject r = json(runner.handle(req.toString()));
+        assertTrue("a turn made of tool calls only is an answer, not an empty output", r.getBoolean("ok"));
+        assertEquals(1, runtime.lastChat.tools.size());
+        assertTrue(runtime.lastChat.tools.get(0).contains("get_weather"));
+        JSONObject data = r.getJSONObject("data");
+        assertEquals("tool_calls", data.getString("finish_reason"));
+        assertEquals(1, data.getInt("tool_calls_count"));
+        JSONObject call = data.getJSONArray("tool_calls").getJSONObject(0);
+        assertEquals("get_weather", call.getString("name"));
+        assertEquals("Rome", call.getJSONObject("arguments").getString("city"));
+    }
+
+    @Test public void noTextAndNoCallsIsStillAnEmptyOutput() throws Exception {
+        runtime.answer = "";
+        assertEquals("EMPTY_OUTPUT", json(runner.handle(chatRequest("t2").toString())).getString("error_name"));
+    }
+
+    @Test public void withoutThinkingTheFieldsStillExistAndAreEmpty() throws Exception {
+        JSONObject data = json(runner.handle(request("e6", "cpu", "m"))).getJSONObject("data");
+        assertEquals("", data.getString("thinking"));
+        assertEquals(0, data.getInt("tool_calls_count"));
+    }
+
+    // ---- the activation precision is part of the engine key
+
+    private static String requestWithActivation(String id, String activation) throws Exception {
+        JSONObject r = new JSONObject(request(id, "gpu", "m"));
+        if (activation != null) r.put("activation", activation);
+        return r.toString();
+    }
+
+    @Test public void theActivationReachesTheRuntimeAndAnAbsentOneIsTheDefault() throws Exception {
+        runner.handle(requestWithActivation("a1", "fp32"));
+        assertEquals("load gpu /models/m.litertlm 4096 fp32", runtime.log.get(0));
+        runtime.log.clear();
+        LitertRunner other = new LitertRunner(runtime, () -> clock.addAndGet(5));
+        other.handle(requestWithActivation("a2", null));
+        assertEquals("the default adds nothing to what the runtime sees", "load gpu /models/m.litertlm 4096", runtime.log.get(0));
+    }
+
+    @Test public void theSameActivationReusesTheEngine() throws Exception {
+        runner.handle(requestWithActivation("a1", "fp32"));
+        JSONObject second = json(runner.handle(requestWithActivation("a2", "fp32"))).getJSONObject("data");
+        assertTrue(second.getBoolean("engine_reused"));
+        assertEquals(1, runtime.log.stream().filter(l -> l.startsWith("load")).count());
+    }
+
+    @Test public void aDifferentActivationClosesTheOldEngineBeforeTheNewOneOpens() throws Exception {
+        runner.handle(requestWithActivation("a1", null));
+        JSONObject second = json(runner.handle(requestWithActivation("a2", "fp32"))).getJSONObject("data");
+        assertFalse("an fp16 engine is not an fp32 one", second.getBoolean("engine_reused"));
+        java.util.List<String> kinds = new java.util.ArrayList<>();
+        for (String line : runtime.log) if (line.startsWith("load") || line.equals("close")) kinds.add(line.split(" ")[0]);
+        assertEquals(java.util.Arrays.asList("load", "close", "load"), kinds);
+    }
+
+    @Test public void theResultAndTheStatusSayWhichActivationWasAskedFor() throws Exception {
+        JSONObject data = json(runner.handle(requestWithActivation("a1", "fp32"))).getJSONObject("data");
+        assertEquals("fp32", data.getString("activation_requested"));
+        assertEquals("fp32", json(runner.handle("{\"op\":\"status\"}")).getJSONObject("data").getString("loaded_activation"));
+        LitertRunner fresh = new LitertRunner(runtime, () -> clock.addAndGet(5));
+        assertEquals("default", json(fresh.handle(requestWithActivation("a2", null))).getJSONObject("data").getString("activation_requested"));
     }
 }
