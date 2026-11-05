@@ -94,6 +94,13 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- The visible AI run surface: aicore jobs answer only while it is up. -->
+        <activity
+            android:name=".app.terminal.ai.AiRunActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <activity-alias
             android:name=".HomeActivity"
             android:exported="true"

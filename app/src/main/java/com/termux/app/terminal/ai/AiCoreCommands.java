@@ -9,6 +9,9 @@ import org.json.JSONObject;
  */
 public final class AiCoreCommands {
 
+    /** Our own typed code for a model name no selection reports. */
+    public static final int MODEL_NOT_FOUND_CODE = 2002;
+
     private final AiCoreEngine engine;
 
     public AiCoreCommands(AiCoreEngine engine) { this.engine = engine; }
@@ -23,7 +26,9 @@ public final class AiCoreCommands {
             case "aicore.models":
                 return engine.models();
             case "aicore.download":
-                return engine.download(selection(args));
+                if (args.optBoolean("status_only", false)) return engine.downloadStatus(selection(args));
+                if (args.optBoolean("wait", false)) return engine.download(selection(args));
+                return engine.downloadAsync(selection(args));
             case "aicore.generate": {
                 // Every argument is checked before the model is touched.
                 GenParams params = GenParams.fromArgs(args);
@@ -44,13 +49,28 @@ public final class AiCoreCommands {
                 .put("error_name", failure.name)
                 .put("error_code", failure.code);
             if (failure.retryDelayMs >= 0) json.put("retry_delay_ms", failure.retryDelayMs);
+            String remedy = AiForegroundPolicy.remedyFor(failure.name);
+            if (remedy != null) json.put("remedy", remedy);
             return json.toString();
         } catch (Exception e) {
             return "{\"ok\":false,\"error\":\"internal error\"}";
         }
     }
 
-    static ModelSelection selection(JSONObject args) {
+    /** stage/preference as given, or the selection the asked model name reports. */
+    ModelSelection selection(JSONObject args) throws AiCoreFailure {
+        String name = optionalString(args, "model");
+        if (name != null) {
+            if (args.has("stage") || args.has("preference")) {
+                throw new IllegalArgumentException("model cannot be combined with stage or preference");
+            }
+            ModelSelection found = engine.selectionForName(name);
+            if (found == null) {
+                throw new AiCoreFailure("MODEL_NOT_FOUND", MODEL_NOT_FOUND_CODE, -1L,
+                    "no AICore model is named \"" + name + "\"; ask \"aicore models\" for the names", null);
+            }
+            return found;
+        }
         return ModelSelection.parse(optionalString(args, "stage"), optionalString(args, "preference"));
     }
 

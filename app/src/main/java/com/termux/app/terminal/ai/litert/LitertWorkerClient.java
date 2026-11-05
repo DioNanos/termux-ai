@@ -23,7 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * The main process's end of the border to {@code :litert}. It binds the service on the first request, matches each
  * reply to its request, and turns a dead process into MODEL_WORKER_DIED for every request in flight. After a death
- * the next request binds again; the one that died is never sent a second time.
+ * the next request binds again; the engine retries a generate once (declared as {@code spawn_retried}), everything
+ * else is not sent a second time.
  */
 public final class LitertWorkerClient implements LitertWorker {
     private static final long START_TIMEOUT_MS = 15_000L;

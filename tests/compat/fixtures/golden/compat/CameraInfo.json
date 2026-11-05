@@ -1,0 +1,64 @@
+[
+  {
+    "id": "0",
+    "facing": "back",
+    "jpeg_output_sizes": [
+      {
+        "width": 4032,
+        "height": 3024
+      },
+      {
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "focal_lengths": [
+      3.5
+    ],
+    "auto_exposure_modes": [
+      "CONTROL_AE_MODE_OFF",
+      "CONTROL_AE_MODE_ON",
+      "CONTROL_AE_MODE_ON_AUTO_FLASH",
+      "CONTROL_AE_MODE_ON_ALWAYS_FLASH",
+      "CONTROL_AE_MODE_ON_AUTO_FLASH_REDEYE"
+    ],
+    "physical_size": {
+      "width": 3.75,
+      "height": 2.5
+    },
+    "capabilities": [
+      "backward_compatible",
+      "burst_capture",
+      "manual_post_processing",
+      "manual_sensor",
+      "raw",
+      "read_sensor_settings"
+    ]
+  },
+  {
+    "id": "1",
+    "facing": "front",
+    "jpeg_output_sizes": [
+      {
+        "width": 3264,
+        "height": 2448
+      }
+    ],
+    "focal_lengths": [
+      2.25
+    ],
+    "auto_exposure_modes": [
+      "CONTROL_AE_MODE_OFF",
+      "CONTROL_AE_MODE_ON"
+    ],
+    "physical_size": {
+      "width": 2.75,
+      "height": 2.0
+    },
+    "capabilities": [
+      "backward_compatible",
+      "manual_sensor",
+      "read_sensor_settings"
+    ]
+  }
+]
