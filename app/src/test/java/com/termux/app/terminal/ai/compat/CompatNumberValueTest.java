@@ -131,7 +131,11 @@ public class CompatNumberValueTest {
         }
     }
 
-    /** As {@link #assertRefused}; a JSON container that refuses to hold the value at all has refused it first. */
+    /**
+     * As {@link #assertRefused}; a JSON container that refuses to hold the value at all has refused it first. The
+     * camera arrays are built with JSONArray.put(Object), which holds the value, so here the adapter is reached;
+     * the container and the adapter are measured apart in the non-finite tests further down.
+     */
     private static void assertRefusedOrNotBuilt(String label, Object focal, Object mixed) throws Exception {
         try {
             assertRefused(label, focal, mixed);
@@ -215,7 +219,9 @@ public class CompatNumberValueTest {
                 try {
                     assertFieldRefused("non-finite " + bad + " in " + field, field, bad);
                 } catch (org.json.JSONException containerRefusal) {
-                    // the container library does not hold a non-finite number
+                    // the container library does not hold a non-finite number: this is the container's refusal,
+                    // not the adapter's; the readers' own guards are measured by
+                    // aNonFiniteValueInAReadFieldIsRefusedByTheReaderItself
                 }
             }
         }
@@ -247,6 +253,180 @@ public class CompatNumberValueTest {
     @Test public void aLongThatADoubleCannotHoldIsRefusedInTheDecimalField() throws Exception {
         assertFieldRefused("2^53 + 1 as a decimal", "temperature", Long.valueOf((1L << 53) + 1));
         assertFieldRefused("Long.MAX_VALUE as a decimal", "temperature", Long.valueOf(Long.MAX_VALUE));
+    }
+
+
+    // ---- negative zero: the writer and the decimal reader keep its sign, the integer readers read it as 0
+
+    @Test public void negativeZeroKeepsItsSignInTheWriterAndTheDecimalField() throws Exception {
+        String out = adapt(Double.valueOf(-0.0), "x");
+        assertTrue(out, out.contains("\"focal_lengths\": [\n      -0.0\n    ]"));
+        out = adapt(Float.valueOf(-0.0f), "x");
+        assertTrue(out, out.contains("\"focal_lengths\": [\n      -0.0\n    ]"));
+        out = adapt(1.5, Double.valueOf(-0.0));
+        assertTrue(out, out.contains("\"auto_exposure_modes\": [\n      -0.0\n    ]"));
+        out = battery("temperature", Double.valueOf(-0.0));
+        assertTrue(out, out.contains("\"temperature\": -0.0,"));
+        out = battery("temperature", Float.valueOf(-0.0f));
+        assertTrue(out, out.contains("\"temperature\": -0.0,"));
+    }
+
+    @Test public void negativeZeroIsReadAsZeroByTheIntegerAndLongFields() throws Exception {
+        String out = battery("voltage", Double.valueOf(-0.0));
+        assertTrue(out, out.contains("\"voltage\": 0,"));
+        assertFalse(out, out.contains("-0"));
+        out = battery("charge_uah", Double.valueOf(-0.0));
+        assertTrue(out, out.contains("\"charge_counter\": 0\n"));
+        assertFalse(out, out.contains("-0"));
+        out = battery("voltage", Float.valueOf(-0.0f));
+        assertTrue(out, out.contains("\"voltage\": 0,"));
+    }
+
+    // ---- non-finite numbers: the container's own refusal and the adapter's guards, measured apart
+
+    private static final Object[] NON_FINITE = {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+        Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY};
+
+    @Test public void theObjectContainerRefusesANonFiniteValueBeforeTheAdapterRuns() {
+        // JSONObject.put validates every number it is given: a non-finite value never enters the object, so a
+        // refusal seen here belongs to the container and proves nothing about the adapter.
+        for (Object bad : NON_FINITE) {
+            try {
+                new JSONObject().put("temperature", bad);
+                fail("the container held non-finite " + bad);
+            } catch (org.json.JSONException expected) {
+                // the container's refusal
+            }
+        }
+    }
+
+    @Test public void aNonFiniteArrayElementReachesTheWriterAndIsRefusedThere() throws Exception {
+        // JSONArray.put(Object) holds the value without validating it, so the element does reach the adapter: the
+        // refusal below is the writer's own guard, not the container's.
+        for (Object bad : NON_FINITE) {
+            JSONArray probe = new JSONArray().put(bad);
+            assertEquals("the array held " + bad, bad, probe.opt(0));
+            assertRefused("non-finite " + bad + " in the number array", bad, "x");
+            assertRefused("non-finite " + bad + " in the mixed array", 1.5, bad);
+        }
+    }
+
+    /**
+     * A battery document that answers {@code value} for {@code field} directly from opt, the accessor the adapter
+     * reads. No path through put can carry a non-finite number into an object field, so the readers' own guards
+     * are measured through this answer, on every runtime, rather than claimed from the container.
+     */
+    private static JSONObject batteryAnswering(final String field, final Object value) throws Exception {
+        JSONObject d = new JSONObject() {
+            @Override public Object opt(String key) {
+                return field.equals(key) ? value : super.opt(key);
+            }
+        };
+        d.put("level", 88).put("charging", true).put("current_ua", -1).put("charge_uah", 1L);
+        d.put(field, 0); // present for has(); its value is the one opt answers
+        return d;
+    }
+
+    @Test public void aNonFiniteValueInAReadFieldIsRefusedByTheReaderItself() throws Exception {
+        // The decimal reader's finiteness guard is the only one that stops a non-finite temperature. In the integer
+        // and long fields the same values are also refused by the exact-integer and range checks that follow, so
+        // the refusal there is measured but is not attributed to the finiteness guard alone.
+        for (Object bad : NON_FINITE) {
+            for (String field : new String[] {"temperature", "voltage", "charge_uah", "level"}) {
+                assertDocumentRefused("non-finite " + bad + " in " + field, batteryAnswering(field, bad));
+            }
+        }
+    }
+
+    @Test public void theAnsweringDocumentIsReadAsAnOrdinaryOneForAFiniteValue() throws Exception {
+        // control: the answering document itself is accepted, so the refusals above come from the value
+        String out = new String(CompatResultAdapter.adapt(BATTERY, batteryAnswering("temperature", Double.valueOf(29.5))).stdout,
+            StandardCharsets.UTF_8);
+        assertTrue(out, out.contains("\"temperature\": 29.5,"));
+    }
+
+    // ---- multi-element arrays refused at their last element: nothing of the valid prefix is published
+
+    private static JSONArray array(Object... values) {
+        JSONArray a = new JSONArray();
+        for (Object v : values) a.put(v);
+        return a;
+    }
+
+    private static JSONObject cameraArrays(JSONArray focal, JSONArray mixed) throws Exception {
+        JSONObject camera = new JSONObject()
+            .put("id", "0").put("facing", "back").put("facing_id", 0)
+            .put("jpeg_output_sizes", new JSONArray().put(new JSONObject().put("width", 640).put("height", 480)))
+            .put("focal_lengths", focal)
+            .put("auto_exposure_modes", mixed)
+            .put("physical_size", new JSONObject().put("width", 5.5).put("height", 4.25))
+            .put("capabilities", new JSONArray().put("c"));
+        return new JSONObject().put("cameras", new JSONArray().put(camera));
+    }
+
+    private static void assertArraysRefused(String label, JSONArray focal, JSONArray mixed) throws Exception {
+        try {
+            CompatResultAdapter.Outcome outcome = CompatResultAdapter.adapt(CAMERA, cameraArrays(focal, mixed));
+            fail(label + " must be refused, it was written as: " + new String(outcome.stdout, StandardCharsets.UTF_8));
+        } catch (CompatResultAdapter.AdapterException e) {
+            assertEquals(label, CompatError.E_INVALID_RESPONSE, e.code);
+        }
+    }
+
+    @Test public void aNumberArrayWithAValidPrefixAndAnInvalidLastElementIsRefusedWhole() throws Exception {
+        JSONArray mixed = array("CONTROL_AE_MODE_ON");
+        // control: the prefix alone is written
+        String out = new String(CompatResultAdapter.adapt(CAMERA, cameraArrays(array(1.5, 2, 5_000_000_000L), mixed)).stdout,
+            StandardCharsets.UTF_8);
+        assertTrue(out, out.contains("\"focal_lengths\": [\n      1.5,\n      2,\n      5000000000\n    ]"));
+        assertArraysRefused("BigDecimal last", array(1.5, 2, 5_000_000_000L, new BigDecimal("4.25")), mixed);
+        assertArraysRefused("BigInteger last", array(1.5, 2, BigInteger.TEN), mixed);
+        assertArraysRefused("NaN last", array(1.5, 2, Double.NaN), mixed);
+        assertArraysRefused("a string last", array(1.5, 2, "4.25"), mixed);
+        Custom custom = new Custom();
+        assertArraysRefused("custom Number last", array(1.5, 2, custom), mixed);
+        assertEquals("no conversion was asked of it", 0, custom.conversions);
+    }
+
+    @Test public void aMixedArrayWithAValidPrefixAndAnInvalidLastElementIsRefusedWhole() throws Exception {
+        JSONArray focal = array(1.5);
+        String out = new String(CompatResultAdapter.adapt(CAMERA, cameraArrays(focal, array("CONTROL_AE_MODE_ON", 3, 0.5))).stdout,
+            StandardCharsets.UTF_8);
+        assertTrue(out, out.contains("\"auto_exposure_modes\": [\n      \"CONTROL_AE_MODE_ON\",\n      3,\n      0.5\n    ]"));
+        assertArraysRefused("BigDecimal last", focal, array("CONTROL_AE_MODE_ON", 3, new BigDecimal("4.25")));
+        assertArraysRefused("Short last", focal, array("CONTROL_AE_MODE_ON", 3, Short.valueOf((short) 3)));
+        assertArraysRefused("infinity last", focal, array("CONTROL_AE_MODE_ON", 3, Double.POSITIVE_INFINITY));
+        assertArraysRefused("a boolean last", focal, array("CONTROL_AE_MODE_ON", 3, Boolean.TRUE));
+    }
+
+    // ---- the boundaries of the decimal field
+
+    /**
+     * The decimal field writes the double the long converts to without loss, as Double.toString of the running
+     * runtime spells it. That text is the shortest one that reads back to the same double, not every decimal digit
+     * of the long (for -2^63 it is -9.223372036854776E18), and its exact spelling may differ between runtimes, so
+     * the test asserts the runtime's own spelling and that it reads back to exactly the long that was given.
+     */
+    private static void assertDecimalHoldsLongExactly(long value) throws Exception {
+        String out = battery("temperature", Long.valueOf(value));
+        String expected = Double.toString((double) value);
+        assertTrue(out, out.contains("\"temperature\": " + expected + ","));
+        double readBack = Double.parseDouble(expected);
+        assertTrue("the written text reads back inside the long range: " + expected, readBack < 9.223372036854775808E18);
+        assertEquals("the written text reads back to " + value + " exactly", value, (long) readBack);
+    }
+
+    @Test public void longsADoubleHoldsExactlyAreWrittenInTheDecimalField() throws Exception {
+        assertDecimalHoldsLongExactly(Long.MIN_VALUE);       // -2^63, a power of two
+        assertDecimalHoldsLongExactly((1L << 53) + 2);       // above 2^53, still exact as a double
+        assertDecimalHoldsLongExactly(1L << 62);
+        assertDecimalHoldsLongExactly(-(1L << 53));
+    }
+
+    @Test public void aNegativeLongADoubleWouldRoundIsRefusedInTheDecimalField() throws Exception {
+        // -2^53 - 1 would become -2^53 as a double: a different measure
+        assertFieldRefused("-2^53 - 1 as a decimal", "temperature", Long.valueOf(-(1L << 53) - 1));
+        assertFieldRefused("Long.MIN_VALUE + 1 as a decimal", "temperature", Long.valueOf(Long.MIN_VALUE + 1));
     }
 
     // ---- the public outcome of the client
@@ -295,5 +475,29 @@ public class CompatNumberValueTest {
         assertEquals(r.stdout, 4, r.exit);
         assertEquals("E_INVALID_RESPONSE\n", r.stderr);
         assertEquals("", r.stdout);
+    }
+
+    private static String cameras(String focalLiteral, String mixedLiteral) {
+        return "{\"cameras\":[{\"id\":\"0\",\"facing\":\"back\",\"facing_id\":0,"
+            + "\"jpeg_output_sizes\":[{\"width\":640,\"height\":480}],\"focal_lengths\":[" + focalLiteral + "],"
+            + "\"auto_exposure_modes\":[" + mixedLiteral + "],\"physical_size\":{\"width\":5.5,\"height\":4.25},"
+            + "\"capabilities\":[\"c\"]}]}";
+    }
+
+    private static void assertClientRefused(String label, Run r) {
+        assertEquals(label + ": " + r.stdout, 4, r.exit);
+        assertEquals(label, "E_INVALID_RESPONSE\n", r.stderr);
+        assertEquals(label, "", r.stdout);
+    }
+
+    @Test public void theClientPublishesNothingOfAnArrayRefusedAtItsLastElement() {
+        Run control = new Run(cameras("1.5,2,5000000000", "\"CONTROL_AE_MODE_ON\",3"));
+        assertEquals(control.stderr, 0, control.exit);
+        assertTrue(control.stdout, control.stdout.contains("      5000000000\n"));
+        assertClientRefused("number array, a boolean last", new Run(cameras("1.5,2,true", "\"CONTROL_AE_MODE_ON\"")));
+        assertClientRefused("number array, a string last", new Run(cameras("1.5,2,\"4.25\"", "\"CONTROL_AE_MODE_ON\"")));
+        assertClientRefused("number array, 1e999 last", new Run(cameras("1.5,2,1e999", "\"CONTROL_AE_MODE_ON\"")));
+        assertClientRefused("mixed array, a boolean last", new Run(cameras("1.5", "\"CONTROL_AE_MODE_ON\",3,true")));
+        assertClientRefused("mixed array, 1e999 last", new Run(cameras("1.5", "\"CONTROL_AE_MODE_ON\",3,1e999")));
     }
 }
