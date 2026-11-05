@@ -165,6 +165,16 @@ public class CompatNumberValueTest {
         }
     }
 
+    /** As {@link #assertFieldRefused} on a document the caller has already built, and measured, before the adapter runs. */
+    private static void assertDocumentRefused(String label, JSONObject document) throws Exception {
+        try {
+            String out = new String(CompatResultAdapter.adapt(BATTERY, document).stdout, StandardCharsets.UTF_8);
+            fail(label + " must be refused, it was written as: " + out);
+        } catch (CompatResultAdapter.AdapterException e) {
+            assertEquals(label, CompatError.E_INVALID_RESPONSE, e.code);
+        }
+    }
+
     @Test public void aBigIntegerInTheLongFieldIsRefusedAndNeverRoundedThroughADouble() throws Exception {
         // 2^53 + 1 is a long, exactly; as a double it would become 2^53: a different measure, written silently.
         assertFieldRefused("BigInteger 2^53+1", "charge_uah", new BigInteger("9007199254740993"));
@@ -190,8 +200,12 @@ public class CompatNumberValueTest {
     @Test public void aCustomNumberInAReadFieldIsRefusedWithoutAnyConversion() throws Exception {
         for (String field : new String[] {"level", "charge_uah", "temperature", "voltage"}) {
             Custom custom = new Custom();
-            assertFieldRefused("custom Number in " + field, field, custom);
-            assertEquals("no conversion was asked of it in " + field, 0, custom.conversions);
+            // Android's JSONObject.put validates every Number with JSON.checkDouble(value.doubleValue()): the
+            // container asks one conversion before the adapter can see the value, so only the adapter is measured.
+            JSONObject document = battery(field, (Object) custom);
+            int askedByTheContainer = custom.conversions;
+            assertDocumentRefused("custom Number in " + field, document);
+            assertEquals("the adapter asked no conversion of it in " + field, askedByTheContainer, custom.conversions);
         }
     }
 
