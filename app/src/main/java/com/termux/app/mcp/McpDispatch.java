@@ -10,6 +10,18 @@ import org.json.JSONObject;
  *
  * <p>Newline-delimited JSON-RPC: one request line in, one response line out.
  * Methods: {@code initialize}, {@code tools/list}, {@code tools/call}.
+ *
+ * <p>Auth: {@code initialize} must carry {@code params.auth} as a JSON <b>string</b>
+ * that the {@link AuthCheck} of this connection's server epoch accepts. Until then
+ * {@code tools/list} and {@code tools/call} are denied. Every {@code initialize}
+ * first clears {@code authed}, so a failed re-initialize never leaves an earlier
+ * success standing; and once the epoch has ended ({@link AuthCheck#live()}) the
+ * connection is no longer authenticated. The check is a contract and a defence
+ * against clients that were never provisioned, not isolation between processes of
+ * the same uid.
+ *
+ * <p>Diagnostics are fixed texts: nothing from the request (method, params,
+ * parser or tool exception text) is ever echoed back or concatenated.
  */
 public final class McpDispatch {
 
@@ -19,8 +31,19 @@ public final class McpDispatch {
     }
 
     public interface AuthCheck {
+        /** True only for the token of the epoch this check belongs to, while that epoch is live. */
         boolean ok(String token);
+
+        /** False once the server epoch this connection was accepted under has ended. */
+        boolean live();
     }
+
+    /**
+     * The one method this dispatcher accepts and answers with nothing at all. Every other non-blank
+     * line, malformed or not, gets exactly one response line; {@link McpStdioShim} counts the answers it
+     * is owed from this contract.
+     */
+    static final String NO_REPLY_METHOD = "notifications/initialized";
 
     public static final String SERVER_NAME = "android-control";
     public static final String SERVER_VERSION = "0.1.0";
@@ -30,12 +53,13 @@ public final class McpDispatch {
     private boolean authed = false;
 
     public McpDispatch(ToolHandler handler, AuthCheck auth) {
+        if (handler == null || auth == null) throw new NullPointerException("handler and auth are required");
         this.handler = handler;
         this.auth = auth;
     }
 
     public boolean isAuthed() {
-        return authed;
+        return authed && auth.live();
     }
 
     /** Process one JSON-RPC line and return one JSON-RPC response line. */
@@ -52,26 +76,28 @@ public final class McpDispatch {
             switch (method) {
                 case "initialize":
                     return initialize(id, params);
-                case "notifications/initialized":
+                case NO_REPLY_METHOD:
                     // notification, no response expected; return empty ack
                     return "";
                 case "tools/list":
-                    if (!authed) return err(id, -32002, "not authenticated");
+                    if (!isAuthed()) return err(id, -32002, "not authenticated");
                     return toolsList(id);
                 case "tools/call":
-                    if (!authed) return err(id, -32002, "not authenticated");
+                    if (!isAuthed()) return err(id, -32002, "not authenticated");
                     return toolsCall(id, params);
                 default:
-                    return err(id, -32601, "method not found: " + method);
+                    return err(id, -32601, "method not found");
             }
         } catch (Exception e) {
-            return err(id, -32700, "parse error: " + e.getMessage());
+            return err(id, -32700, "parse error");
         }
     }
 
     private String initialize(Object id, JSONObject params) {
-        String token = params.optString("auth", "");
-        if (auth != null && !auth.ok(token)) {
+        // A failed initialize must not leave an earlier successful one standing.
+        authed = false;
+        Object presented = params.opt("auth");
+        if (!(presented instanceof String) || !auth.ok((String) presented)) {
             return err(id, -32001, "authentication failed");
         }
         authed = true;
@@ -84,7 +110,7 @@ public final class McpDispatch {
                 .put("serverInfo", info);
             return ok(id, result);
         } catch (Exception e) {
-            return err(id, -32603, "internal: " + e.getMessage());
+            return err(id, -32603, "internal error");
         }
     }
 
@@ -112,7 +138,7 @@ public final class McpDispatch {
             JSONObject result = new JSONObject().put("tools", tools);
             return ok(id, result);
         } catch (Exception e) {
-            return err(id, -32603, "internal: " + e.getMessage());
+            return err(id, -32603, "internal error");
         }
     }
 
@@ -128,7 +154,7 @@ public final class McpDispatch {
                 .put("isError", false);
             return ok(id, result);
         } catch (Exception e) {
-            return err(id, -32000, "tool error: " + e.getMessage());
+            return err(id, -32000, "tool error");
         }
     }
 

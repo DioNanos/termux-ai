@@ -19,7 +19,11 @@ public enum LitertErrorCode {
     MODEL_WORKER_DIED(1015),
     GENERATION_FAILED(1016),
     /** The native cancel did not return in time; the conversation was left open rather than closed under it. */
-    CANCEL_TIMEOUT(1017);
+    CANCEL_TIMEOUT(1017),
+    /** The directory the SDK keeps its compile cache in does not exist and could not be created, or is not writable. */
+    CACHE_DIRECTORY_UNAVAILABLE(1018),
+    /** The generation ended with no answer text: an empty string is never reported as a success. */
+    EMPTY_OUTPUT(1019);
 
     public final int number;
 

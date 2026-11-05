@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# android-control MCP shim — bridges stdio <-> the in-APK MCP Unix socket.
+# Point an MCP client (claude/codex) at this command as a stdio MCP server.
+#
+# The socket is private (0600, com.termux sandbox); only this uid can connect.
+SOCK="/data/data/com.termux/files/apps/com.termux/termux-ai/mcp.sock"
+
+if [ ! -S "$SOCK" ]; then
+    echo "android-control: MCP socket not found ($SOCK)." >&2
+    echo "Open termux-ai once and enable Accessibility > Termux AI android-control." >&2
+    exit 1
+fi
+
+if ! command -v socat >/dev/null 2>&1; then
+    echo "android-control: 'socat' is required. Install it with: pkg install socat" >&2
+    exit 1
+fi
+
+exec socat - "UNIX-CONNECT:$SOCK"

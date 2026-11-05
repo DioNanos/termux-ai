@@ -66,8 +66,28 @@ jobs:
       - name: Run unit tests
         run: ./gradlew test --no-daemon --stacktrace
 
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-reports-release-candidate-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            app/build/test-results/**
+            app/build/reports/tests/**
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Build unsigned release APKs
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload R8 mapping
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r8-mapping-release-candidate-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: app/build/outputs/mapping/**/mapping.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Stage and validate release candidate
         id: stage

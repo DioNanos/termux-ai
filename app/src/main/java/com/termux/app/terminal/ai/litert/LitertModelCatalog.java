@@ -6,6 +6,7 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -14,12 +15,15 @@ import java.util.regex.Pattern;
 
 /**
  * The models on disk: regular {@code .litertlm} files under one directory in the Termux home, never inside the
- * APK. Listing does not open or hash a file. A name that escapes the directory (traversal, a symlink to
- * somewhere else) is rejected.
+ * APK, at the top level or in up to two levels of folders (id {@code folder/name}). Listing does not open or hash a
+ * file. A name that escapes the directory (traversal, a symlink to somewhere else) is rejected, and a symlinked
+ * folder is reported, not followed.
  */
 public final class LitertModelCatalog {
     public static final String EXTENSION = ".litertlm";
-    private static final Pattern ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+    private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+    /** Two levels of folders and the file name. */
+    static final int MAX_SEGMENTS = 3;
 
     private final File root;
 
@@ -27,38 +31,64 @@ public final class LitertModelCatalog {
 
     public File root() { return root; }
 
-    /** The listing: {@code models} (id, path, size) plus {@code problems} for files that were skipped. */
+    /** The listing: {@code models} (id, path, size) plus {@code problems} for files and folders that were skipped. */
     public JSONObject list() throws JSONException {
         JSONArray models = new JSONArray();
         JSONArray problems = new JSONArray();
         boolean exists = root.isDirectory();
-        if (exists) {
-            File[] files = root.listFiles();
-            if (files == null) {
-                problems.put(problem(root.getName(), "the directory cannot be read"));
-                files = new File[0];
-            }
-            Arrays.sort(files, Comparator.comparing(File::getName));
-            for (File file : files) {
-                String name = file.getName();
-                if (!name.endsWith(EXTENSION)) continue;
-                String id = name.substring(0, name.length() - EXTENSION.length());
-                try {
-                    File canonical = check(id, file);
-                    models.put(new JSONObject().put("id", id).put("path", canonical.getPath()).put("size_bytes", canonical.length()));
-                } catch (LitertFailure failure) {
-                    problems.put(problem(name, failure.getMessage()));
-                }
-            }
-        }
+        if (exists) scan(root, "", 0, models, problems);
         return new JSONObject().put("directory", root.getPath()).put("directory_exists", exists)
             .put("models", models).put("problems", problems);
     }
 
+    /** One folder: its models, then its sub-folders, in name order. {@code prefix} is the folder's id prefix. */
+    private void scan(File dir, String prefix, int depth, JSONArray models, JSONArray problems) throws JSONException {
+        File[] files = dir.listFiles();
+        if (files == null) {
+            problems.put(problem(prefix.isEmpty() ? root.getName() : prefix.substring(0, prefix.length() - 1), "the directory cannot be read"));
+            return;
+        }
+        Arrays.sort(files, Comparator.comparing(File::getName));
+        for (File file : files) {
+            String name = file.getName();
+            String relative = prefix + name;
+            if (file.isDirectory() && !name.endsWith(EXTENSION)) {
+                if (Files.isSymbolicLink(file.toPath())) {
+                    problems.put(problem(relative, "a symlink to a folder is not followed"));
+                } else if (depth >= MAX_SEGMENTS - 1) {
+                    problems.put(problem(relative, "the folder is nested deeper than " + (MAX_SEGMENTS - 1) + " levels"));
+                } else if (!SEGMENT.matcher(name).matches()) {
+                    problems.put(problem(relative, "the folder name is not valid in a model id"));
+                } else {
+                    scan(file, relative + "/", depth + 1, models, problems);
+                }
+                continue;
+            }
+            if (!name.endsWith(EXTENSION)) continue;
+            String id = relative.substring(0, relative.length() - EXTENSION.length());
+            try {
+                File canonical = check(id, file);
+                models.put(new JSONObject().put("id", id).put("path", canonical.getPath()).put("size_bytes", canonical.length()));
+            } catch (LitertFailure failure) {
+                problems.put(problem(relative, failure.getMessage()));
+            }
+        }
+    }
+
+    /** A model id: one to three segments of letters, digits and . _ - joined by "/"; no segment starts with a dot. */
+    static boolean validId(String id) {
+        if (id == null) return false;
+        String[] parts = id.split("/", -1);
+        if (parts.length > MAX_SEGMENTS) return false;
+        for (String part : parts) if (!SEGMENT.matcher(part).matches()) return false;
+        return true;
+    }
+
     /** The canonical file of a model id, or a {@link LitertFailure}. */
     public File resolve(String id) throws LitertFailure {
-        if (id == null || !ID.matcher(id).matches()) {
-            throw LitertFailure.invalid("model must be an id such as qwen3-0.6b (letters, digits . _ -)");
+        if (!validId(id)) {
+            throw LitertFailure.invalid("model must be an id such as qwen3-0.6b or folder/qwen3-0.6b (letters, digits . _ -; up to "
+                + (MAX_SEGMENTS - 1) + " folders)");
         }
         File file = new File(root, id + EXTENSION);
         if (!file.exists()) {
@@ -69,7 +99,7 @@ public final class LitertModelCatalog {
     }
 
     private File check(String id, File file) throws LitertFailure {
-        if (!ID.matcher(id).matches()) throw invalidModel(id, "the file name is not a valid model id");
+        if (!validId(id)) throw invalidModel(id, "the file name is not a valid model id");
         File canonical;
         File canonicalRoot;
         try {

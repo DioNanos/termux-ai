@@ -46,6 +46,17 @@ jobs:
       - name: Run unit tests
         run: ./gradlew test --no-daemon --stacktrace
 
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-reports-blocking-ci-debug-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            app/build/test-results/**
+            app/build/reports/tests/**
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Build debug APKs
         env:
           TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS: '1'

@@ -113,6 +113,10 @@ public final class TermuxAiSocketServer {
                 // The frame ends at the newline: the peer is not expected to close its
                 // side, so nothing is read after it and the model call is never delayed
                 // by the receive timeout. The helper socket class is used as it is.
+                // Protocol 2 is negotiated on the framed request before the dispatch,
+                // with the untrimmed wire size of the frame so its own request cap
+                // cannot be hidden by whitespace padding: everything that is not
+                // protocol 2 reaches the legacy dispatcher unchanged.
                 final LocalClientSocket.MutableInt count = new LocalClientSocket.MutableInt(0);
                 AiSocketHandler.handle(
                     buffer -> {
@@ -125,7 +129,8 @@ public final class TermuxAiSocketServer {
                             new String(data, StandardCharsets.UTF_8), false);
                         if (sendError != null) throw new java.io.IOException(sendError.getMinimalErrorString());
                     },
-                    this::dispatch,
+                    (frame, frameBytes) ->
+                        AiV2Exchange.exchange(frame, frameBytes, this::dispatch, AiV2Commands.KNOWN),
                     AiRequestFraming.MAX_REQUEST_BYTES);
             } finally {
                 clientSocket.closeClientSocket(false);
@@ -197,13 +202,21 @@ public final class TermuxAiSocketServer {
                         return ok(storageWrite(args));
                     case "aicore.info":
                     case "aicore.models":
+                        return ok(aicoreCommands().handle(cmd, args));
                     case "aicore.generate":
                     case "aicore.download":
+                        // The engine answers only with the app in the foreground: bring the run
+                        // surface up first, or fail typed without attempting the call.
+                        AiForegroundGate.ensureResumed(context);
                         return ok(aicoreCommands().handle(cmd, args));
                     case "litert.info":
                     case "litert.models":
+                    case "litert.unload":
+                    case "litert.restart":
+                    case "litert.cancel":
+                    case "litert.config":
                     case "litert.generate":
-                        return ok(new LitertCommands(LitertApp.engine(context)).handle(cmd, args));
+                        return ok(new LitertCommands(LitertApp.engine(context), LitertApp.config()).handle(cmd, args));
                     default:
                         return error("Unknown command: " + cmd);
                 }
@@ -260,6 +273,10 @@ public final class TermuxAiSocketServer {
                     .put("aicore.download")
                     .put("litert.info")
                     .put("litert.models")
+                    .put("litert.unload")
+                    .put("litert.restart")
+                    .put("litert.cancel")
+                    .put("litert.config")
                     .put("litert.generate"));
         }
 
@@ -277,11 +294,72 @@ public final class TermuxAiSocketServer {
 
         private JSONObject battery() throws Exception {
             BatteryManager bm = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
-            return new JSONObject()
+            JSONObject data = new JSONObject()
                 .put("level", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY))
                 .put("charging", bm.isCharging())
                 .put("current_ua", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))
                 .put("charge_uah", bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER));
+            // Additive fields (upstream BatteryStatus schema, GOLDEN_CONTRACT.md
+            // §2): read from the sticky ACTION_BATTERY_CHANGED broadcast — no new
+            // permission, no new API family, additive keys only. The legacy four
+            // keys and their semantics are unchanged.
+            android.content.Intent sticky = context.registerReceiver(null,
+                new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+            if (sticky != null) {
+                int level = sticky.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = sticky.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                data.put("present", sticky.getBooleanExtra(BatteryManager.EXTRA_PRESENT, true));
+                data.put("health", batteryHealthName(sticky.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)));
+                data.put("plugged", batteryPluggedName(sticky.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)));
+                data.put("status", batteryStatusName(sticky.getIntExtra(BatteryManager.EXTRA_STATUS, -1)));
+                int temperature = sticky.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+                if (temperature != Integer.MIN_VALUE) {
+                    data.put("temperature", temperature / 10.0); // 0.1 °C units → double
+                }
+                data.put("voltage", sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1));
+                String technology = sticky.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY);
+                if (technology != null) data.put("technology", technology);
+                if (level >= 0) data.put("raw_level", level);
+                if (scale > 0) {
+                    data.put("scale", scale);
+                    if (level >= 0) data.put("percentage", Math.round(level * 100.0 / scale));
+                }
+            }
+            int currentAvg = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
+            if (currentAvg != Integer.MIN_VALUE) data.put("current_average", currentAvg);
+            return data;
+        }
+
+        private String batteryHealthName(int health) {
+            switch (health) {
+                case android.os.BatteryManager.BATTERY_HEALTH_COLD: return "COLD";
+                case android.os.BatteryManager.BATTERY_HEALTH_DEAD: return "DEAD";
+                case android.os.BatteryManager.BATTERY_HEALTH_GOOD: return "GOOD";
+                case android.os.BatteryManager.BATTERY_HEALTH_OVERHEAT: return "OVERHEAT";
+                case android.os.BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE: return "OVER_VOLTAGE";
+                case android.os.BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE: return "UNSPECIFIED_FAILURE";
+                default: return "UNKNOWN";
+            }
+        }
+
+        private String batteryPluggedName(int plugged) {
+            switch (plugged) {
+                case android.os.BatteryManager.BATTERY_PLUGGED_AC: return "PLUGGED_AC";
+                case android.os.BatteryManager.BATTERY_PLUGGED_DOCK: return "PLUGGED_DOCK";
+                case android.os.BatteryManager.BATTERY_PLUGGED_USB: return "PLUGGED_USB";
+                case android.os.BatteryManager.BATTERY_PLUGGED_WIRELESS: return "PLUGGED_WIRELESS";
+                default: return "UNPLUGGED";
+            }
+        }
+
+        private String batteryStatusName(int status) {
+            switch (status) {
+                case android.os.BatteryManager.BATTERY_STATUS_CHARGING: return "CHARGING";
+                case android.os.BatteryManager.BATTERY_STATUS_DISCHARGING: return "DISCHARGING";
+                case android.os.BatteryManager.BATTERY_STATUS_FULL: return "FULL";
+                case android.os.BatteryManager.BATTERY_STATUS_NOT_CHARGING: return "NOT_CHARGING";
+                default: return "UNKNOWN";
+            }
         }
 
         private JSONObject clipboardGet() throws Exception {
@@ -367,13 +445,46 @@ public final class TermuxAiSocketServer {
 
         private JSONObject audioInfo() throws Exception {
             AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-            return new JSONObject()
+            JSONObject data = new JSONObject()
                 .put("sample_rate", am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE))
                 .put("frames_per_buffer", am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER))
                 .put("bluetooth_a2dp_on", am.isBluetoothA2dpOn())
                 .put("wired_headset_on", am.isWiredHeadsetOn())
                 .put("speakerphone_on", am.isSpeakerphoneOn())
                 .put("music_active", am.isMusicActive());
+            // Additive fields (upstream AudioInfo schema): the measured
+            // default AudioTrack, as upstream AudioAPI reads it. Standard API,
+            // no new permission; additive keys only. AudioTrack.Builder and
+            // getBufferSizeInFrames are API 23 while minSdk is 21: the Builder
+            // stays behind an SDK guard so a 21/22 device never takes a
+            // linkage error (an Error is not caught by catch(Exception)), the
+            // legacy keys keep their previous success, and the track is
+            // released in finally.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                android.media.AudioTrack track = null;
+                try {
+                    track = new android.media.AudioTrack.Builder()
+                        .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                        .build();
+                    data.put("audiotrack_sample_rate", track.getSampleRate());
+                    data.put("audiotrack_buffer_size_in_frames", track.getBufferSizeInFrames());
+                } catch (Exception e) {
+                    // Expected, RECOVERABLE measurement failures only (no
+                    // output device, unsupported state): the additive keys
+                    // stay absent and the legacy success is preserved.
+                    // Fatal errors and invariant violations (Error, e.g.
+                    // AssertionError, OutOfMemoryError) are NOT absorbed:
+                    // they propagate, so a broken invariant can never come
+                    // back masquerading as a legacy success; the finally
+                    // release still runs on every path.
+                } finally {
+                    if (track != null) track.release();
+                }
+            }
+            return data;
         }
 
         private JSONObject audioVolume(JSONObject args) throws Exception {
@@ -421,10 +532,72 @@ public final class TermuxAiSocketServer {
                 CameraCharacteristics c = manager.getCameraCharacteristics(id);
                 Integer facing = c.get(CameraCharacteristics.LENS_FACING);
                 Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
-                cameras.put(new JSONObject()
+                JSONObject camera = new JSONObject()
                     .put("id", id)
                     .put("facing", cameraFacingName(facing))
-                    .put("flash_available", flash != null && flash));
+                    .put("flash_available", flash != null && flash);
+                // Additive fields (upstream CameraInfo schema, GOLDEN_CONTRACT
+                // §2): all read from the same CameraCharacteristics already in
+                // use — no new API family or permission; additive keys only.
+                if (facing != null) camera.put("facing_id", facing);
+                android.hardware.camera2.params.StreamConfigurationMap map =
+                    c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                if (map != null) {
+                    android.util.Size[] sizes = map.getOutputSizes(android.graphics.ImageFormat.JPEG);
+                    if (sizes != null) {
+                        JSONArray out = new JSONArray();
+                        for (android.util.Size s : sizes) {
+                            out.put(new JSONObject().put("width", s.getWidth()).put("height", s.getHeight()));
+                        }
+                        camera.put("jpeg_output_sizes", out);
+                    }
+                }
+                float[] focals = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                if (focals != null) {
+                    JSONArray out = new JSONArray();
+                    for (float f : focals) {
+                        // validate finite before put(): JSONArray.put(double)
+                        // throws on NaN/Infinity on the platform
+                        double fv = (double) f;
+                        if (Double.isFinite(fv)) out.put(fv);
+                    }
+                    camera.put("focal_lengths", out);
+                }
+                int[] aeModes = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+                if (aeModes != null) {
+                    JSONArray out = new JSONArray();
+                    for (int m : aeModes) {
+                        // pin writer: known values are names, unknown values
+                        // are the raw NUMBER, never an invented token
+                        String name = CameraInfoNames.aeModeName(m);
+                        out.put(name != null ? (Object) name : (Object) Integer.valueOf(m));
+                    }
+                    camera.put("auto_exposure_modes", out);
+                }
+                android.util.SizeF physical = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+                if (physical != null) {
+                    // org.json rejects non-finite doubles inside put(): a
+                    // sensor reporting a non-finite dimension keeps the whole
+                    // key absent instead of failing the request (validated
+                    // before put, never a raw crash)
+                    double pw = (double) physical.getWidth();
+                    double ph = (double) physical.getHeight();
+                    if (Double.isFinite(pw) && Double.isFinite(ph)) {
+                        camera.put("physical_size", new JSONObject()
+                            .put("width", pw)
+                            .put("height", ph));
+                    }
+                }
+                int[] caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+                if (caps != null) {
+                    JSONArray out = new JSONArray();
+                    for (int cap : caps) {
+                        String name = CameraInfoNames.capabilityName(cap);
+                        out.put(name != null ? (Object) name : (Object) Integer.valueOf(cap));
+                    }
+                    camera.put("capabilities", out);
+                }
+                cameras.put(camera);
             }
             return new JSONObject().put("cameras", cameras);
         }
@@ -446,13 +619,33 @@ public final class TermuxAiSocketServer {
         private JSONObject wifiConnection() throws Exception {
             WifiManager wm = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             WifiInfo info = wm.getConnectionInfo();
-            return new JSONObject()
+            JSONObject data = new JSONObject()
+                // Additive backend metadata: the adapter can
+                // tell a genuinely absent WifiInfo (the pin's unconnected
+                // branch) from a missing or redacted FIELD; legacy keys keep
+                // their placeholder shape when info == null.
+                .put("wifi_info_present", info != null)
                 .put("ssid", info == null ? "" : info.getSSID())
                 .put("bssid", info == null ? "" : info.getBSSID())
                 .put("rssi", info == null ? 0 : info.getRssi())
                 .put("link_speed_mbps", info == null ? 0 : info.getLinkSpeed())
                 .put("network_id", info == null ? -1 : info.getNetworkId())
                 .put("supplicant_state", info == null ? "" : String.valueOf(info.getSupplicantState()));
+            // Additive fields (upstream WifiConnectionInfo schema): same
+            // WifiInfo already in use — additive keys only, no new permission.
+            if (info != null) {
+                data.put("frequency_mhz", info.getFrequency());
+                data.put("ip", ipFormat(info.getIpAddress()));
+                data.put("mac_address", info.getMacAddress());
+                data.put("ssid_hidden", info.getHiddenSSID());
+            }
+            return data;
+        }
+
+        /** Little-endian int → dotted IPv4, as upstream formats it. */
+        private String ipFormat(int ip) {
+            return String.format(Locale.US, "%d.%d.%d.%d",
+                ip & 0xff, (ip >> 8) & 0xff, (ip >> 16) & 0xff, (ip >> 24) & 0xff);
         }
 
         private JSONObject ttsEngines() throws Exception {
