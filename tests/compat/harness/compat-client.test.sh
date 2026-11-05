@@ -44,7 +44,8 @@ java -Dtermuxai.compat.root="$COMPAT_ROOT" -cp "$WORK" RunTests \
   com.termux.app.terminal.ai.compat.TermuxApiCompatClientTest \
   com.termux.app.terminal.ai.compat.LocalSocketCompatTransportTest \
   com.termux.app.terminal.ai.compat.GoldenOracleCompatTest \
-  com.termux.app.terminal.ai.compat.NativeFixtureContractTest
+  com.termux.app.terminal.ai.compat.NativeFixtureContractTest \
+  com.termux.app.terminal.ai.compat.CompatNumberValueTest
 suite_rc=$?
 note "suite rc=$suite_rc"
 [ "$suite_rc" -eq 0 ] || fail=1

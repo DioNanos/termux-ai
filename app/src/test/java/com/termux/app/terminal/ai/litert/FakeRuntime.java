@@ -19,6 +19,8 @@ final class FakeRuntime implements LitertRuntime {
     CountDownLatch inEvidence;       // counted down when evidence() is asked
     CountDownLatch releaseEvidence;  // evidence() waits for it when set
     String evidence = "";
+    /** How many times the evidence of an engine was asked for: an invalidated request must not ask. */
+    final java.util.concurrent.atomic.AtomicInteger evidenceCalls = new java.util.concurrent.atomic.AtomicInteger();
     /** The chat of the latest generation, as the runtime received it. */
     volatile LitertChat lastChat;
     /** What the next generations answer, think and ask for. */
@@ -28,6 +30,8 @@ final class FakeRuntime implements LitertRuntime {
     /** The text the next generations answer; used with tool calls to model an answer made of calls only. */
     /** When set, closing an engine throws it (after being logged): a close that did not complete. */
     RuntimeException closeFailure;
+    CountDownLatch closing;          // counted down when an engine close starts
+    CountDownLatch releaseClose;     // an engine close waits for it when set (a native close that blocks)
     /** True while the native stop of a generation has been triggered and that generation is still running. */
     volatile boolean cancelled;
     /** False models a slow cancellation: the native inference keeps running after the stop was triggered. */
@@ -92,6 +96,7 @@ final class FakeRuntime implements LitertRuntime {
             }
 
             @Override public String evidence() {
+                evidenceCalls.incrementAndGet();
                 if (inEvidence != null) inEvidence.countDown();
                 if (releaseEvidence != null) {
                     try { releaseEvidence.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -101,6 +106,10 @@ final class FakeRuntime implements LitertRuntime {
 
             @Override public void close() {
                 log.add("close");
+                if (closing != null) closing.countDown();
+                if (releaseClose != null) {
+                    try { releaseClose.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
                 if (closeFailure != null) throw closeFailure;
             }
         };

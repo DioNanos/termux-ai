@@ -326,10 +326,7 @@ public final class CompatResultAdapter {
             if (!(v instanceof Number)) {
                 throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " element not a number");
             }
-            double dv = ((Number) v).doubleValue();
-            if (!Double.isFinite(dv)) {
-                throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " element not finite");
-            }
+            // The writer is the one gate: it refuses unsupported kinds of number and non-finite values.
             w.arrayNumberElement((Number) v);
         }
         w.endArray();
@@ -345,10 +342,6 @@ public final class CompatResultAdapter {
             if (v instanceof String) {
                 w.arrayStringElement((String) v);
             } else if (v instanceof Number) {
-                double dv = ((Number) v).doubleValue();
-                if (!Double.isFinite(dv)) {
-                    throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " element not finite");
-                }
                 w.arrayNumberElement((Number) v);
             } else {
                 throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " element not string or number");
@@ -383,31 +376,38 @@ public final class CompatResultAdapter {
         return requireIntegerInRange(d, key, "long", Long.MIN_VALUE, Long.MAX_VALUE);
     }
 
+    /**
+     * The numbers an integer field may carry: Integer and Long (exact by construction) and Double and Float that
+     * are finite, integral and inside the long range. Any other kind of number (BigDecimal, BigInteger, Short,
+     * Byte, a custom Number) is refused: it is never converted through doubleValue or longValue, which would round
+     * or wrap a value silently.
+     */
     private static long requireIntegerInRange(JSONObject d, String key, String domain, long min, long max)
             throws AdapterException {
         Object v = d.opt(key);
         if (!(v instanceof Number)) {
             throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " missing or not a number");
         }
-        Number n = (Number) v;
-        double dv = n.doubleValue();
-        if (!Double.isFinite(dv)) {
-            throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not a finite number");
-        }
-        if (dv != Math.rint(dv)) {
-            throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not an exact integer");
-        }
         long lv;
-        if (n instanceof Long || n instanceof Integer) {
+        if (v instanceof Long || v instanceof Integer) {
             // integral by construction, no precision loss
-            lv = n.longValue();
-        } else {
+            lv = ((Number) v).longValue();
+        } else if (v instanceof Double || v instanceof Float) {
+            double dv = ((Number) v).doubleValue();
+            if (!Double.isFinite(dv)) {
+                throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not a finite number");
+            }
+            if (dv != Math.rint(dv)) {
+                throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not an exact integer");
+            }
             // Double/Float literal: integral, but 2^63 is not representable
             double longMaxPlusOne = 9.223372036854775808E18;
             if (dv < -longMaxPlusOne || dv >= longMaxPlusOne) {
                 throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " outside the long range");
             }
             lv = (long) dv;
+        } else {
+            throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " number of an unsupported kind");
         }
         if (lv < min || lv > max) {
             throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " outside the " + domain + " range");
@@ -431,16 +431,35 @@ public final class CompatResultAdapter {
         return (String) v;
     }
 
+    /**
+     * The numbers a decimal field may carry: finite Double and Float, and Integer and Long that a double holds
+     * exactly (an ordinary parser reads 29 as an Integer). A Long a double would round, and every other kind of
+     * number, is refused rather than converted.
+     */
     private static double requireFiniteDouble(JSONObject d, String key) throws AdapterException {
         Object v = d.opt(key);
         if (!(v instanceof Number)) {
             throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " missing or not a number");
         }
-        double dv = ((Number) v).doubleValue();
-        if (!Double.isFinite(dv)) {
-            throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not finite");
+        if (v instanceof Integer) {
+            return ((Integer) v).doubleValue();
         }
-        return dv;
+        if (v instanceof Long) {
+            long lv = (Long) v;
+            double dv = (double) lv;
+            if (dv >= 9.223372036854775808E18 || (long) dv != lv) {
+                throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not exactly representable");
+            }
+            return dv;
+        }
+        if (v instanceof Double || v instanceof Float) {
+            double dv = ((Number) v).doubleValue();
+            if (!Double.isFinite(dv)) {
+                throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " not finite");
+            }
+            return dv;
+        }
+        throw new AdapterException(CompatError.E_INVALID_RESPONSE, key + " number of an unsupported kind");
     }
 
     private static JSONArray requireArray(JSONObject d, String key) throws AdapterException {
@@ -596,7 +615,7 @@ public final class CompatResultAdapter {
         }
 
         /** Array element emitters: comma + newline separated like JsonWriter. */
-        void arrayNumberElement(Number value) {
+        void arrayNumberElement(Number value) throws AdapterException {
             beforeValue();
             numberValue(value);
         }
@@ -606,11 +625,24 @@ public final class CompatResultAdapter {
             stringValue(value);
         }
 
-        void numberValue(Number value) {
-            if (value instanceof Double || value instanceof Float) {
-                sb.append(Double.toString(value.doubleValue()));
+        /**
+         * The numbers this writer can write without changing them: Integer and Long, written as the exact integers
+         * they are, and finite Double and Float, written like {@link Double#toString}. Anything else (BigDecimal,
+         * BigInteger, Short, Byte, a custom Number, a non-finite value) is refused, and none of it is converted
+         * through longValue or doubleValue: a value that cannot be written as it is must not be written as
+         * something else. Nothing reaches stdout from a refused document.
+         */
+        void numberValue(Number value) throws AdapterException {
+            if (value instanceof Integer || value instanceof Long) {
+                sb.append(value.toString());
+            } else if (value instanceof Double || value instanceof Float) {
+                double d = value.doubleValue();
+                if (!Double.isFinite(d)) {
+                    throw new AdapterException(CompatError.E_INVALID_RESPONSE, "number not finite");
+                }
+                sb.append(Double.toString(d));
             } else {
-                sb.append(value.longValue());
+                throw new AdapterException(CompatError.E_INVALID_RESPONSE, "number of an unsupported kind");
             }
             hasValue = true;
         }
