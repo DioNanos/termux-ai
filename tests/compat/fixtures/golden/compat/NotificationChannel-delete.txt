@@ -1,0 +1,1 @@
+Deleted channel with id "synthetic-channel".

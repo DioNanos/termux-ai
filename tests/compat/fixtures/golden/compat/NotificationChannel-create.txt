@@ -1,0 +1,1 @@
+Created channel with id "synthetic-channel" and name "Synthetic".

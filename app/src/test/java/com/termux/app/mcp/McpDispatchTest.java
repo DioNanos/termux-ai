@@ -23,8 +23,13 @@ public class McpDispatchTest {
             lastCall[0] = name;
             return "{\"ok\":true}";
         };
-        McpDispatch.AuthCheck a = token -> "secret".equals(token);
-        return new McpDispatch(h, a);
+        return new McpDispatch(h, new SecretAuth());
+    }
+
+    /** An epoch whose token is "secret"; a stand-in for McpAuth (tested on its own). */
+    private static final class SecretAuth implements McpDispatch.AuthCheck {
+        @Override public boolean ok(String token) { return "secret".equals(token); }
+        @Override public boolean live() { return true; }
     }
 
     @Test
@@ -41,6 +46,36 @@ public class McpDispatchTest {
         JSONObject r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"auth\":\"secret\"}}"));
         assertEquals("android-control", r.getJSONObject("result").getJSONObject("serverInfo").getString("name"));
         assertTrue(d.isAuthed());
+    }
+
+    @Test
+    public void initializeRequiresAStringToken() throws Exception {
+        McpDispatch d = dispatcher(new String[1]);
+        JSONObject r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"auth\":12345}}"));
+        assertEquals(-32001, r.getJSONObject("error").getInt("code"));
+        assertFalse(d.isAuthed());
+        r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+        assertEquals(-32001, r.getJSONObject("error").getInt("code"));
+    }
+
+    @Test
+    public void aFailedReinitializeEndsTheSession() throws Exception {
+        McpDispatch d = dispatcher(new String[1]);
+        d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"auth\":\"secret\"}}");
+        assertTrue(d.isAuthed());
+        d.handle("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"auth\":\"wrong\"}}");
+        assertFalse(d.isAuthed());
+        JSONObject r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}"));
+        assertEquals(-32002, r.getJSONObject("error").getInt("code"));
+    }
+
+    @Test
+    public void diagnosticsEchoNothingFromTheRequest() throws Exception {
+        McpDispatch d = dispatcher(new String[1]);
+        JSONObject r = parse(d.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"SENTINEL_METHOD\"}"));
+        assertEquals("method not found", r.getJSONObject("error").getString("message"));
+        r = parse(d.handle("{ SENTINEL_PARSE"));
+        assertEquals("parse error", r.getJSONObject("error").getString("message"));
     }
 
     @Test

@@ -1,10 +1,12 @@
 package com.termux.app.terminal.ai;
 
+import com.termux.app.UncaughtExceptionRecorder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.ClassRule;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -15,6 +17,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class ModelClientCacheTest {
+    // diagnostic for the test JVM: records dying threads, delegates, and restores the handler at the end of the class
+    @ClassRule public static final UncaughtExceptionRecorder.Rule UNCAUGHT = new UncaughtExceptionRecorder.Rule();
+
     /** A client the factory hands out: it counts how many exist and how many were closed. */
     private static final class Client {
         final String key;

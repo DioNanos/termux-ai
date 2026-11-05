@@ -1,0 +1,2 @@
+synthetic clipboard line1
+line2

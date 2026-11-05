@@ -1,9 +1,11 @@
 package com.termux.app.terminal.ai.litert;
 
+import com.termux.app.UncaughtExceptionRecorder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.ClassRule;
 import org.junit.Test;
 
 import java.util.concurrent.CountDownLatch;
@@ -11,6 +13,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class LitertCancelTokenTest {
+    // diagnostic for the test JVM: records dying threads, delegates, and restores the handler at the end of the class
+    @ClassRule public static final UncaughtExceptionRecorder.Rule UNCAUGHT = new UncaughtExceptionRecorder.Rule();
+
     @Test public void cancelRunsTheAttachedStopOnceEvenIfCalledTwice() {
         LitertCancelToken token = new LitertCancelToken(new LitertStopper());
         AtomicInteger stops = new AtomicInteger();
